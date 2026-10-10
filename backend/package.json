@@ -6,9 +6,15 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "db:migrate": "node src/db/migrate.js",
+    "db:seed": "node src/db/seed.js",
+    "db:reset": "node src/db/reset.js",
+    "db:status": "node src/db/status.js",
+    "db:health": "node src/db/health.js"
   },
   "dependencies": {
+    "dotenv": "^18.0.7",
     "express": "^4.21.0",
     "pg": "^8.23.1"
   }

@@ -1,5 +1,5 @@
 import express from "express";
-import { closePool } from "./db/pool.js";
+import { closePool, checkConnection } from "./db/pool.js";
 
 const app = express();
 
@@ -7,13 +7,27 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
-// --- Health check ---------------------------------------------------------
+// --- Health checks --------------------------------------------------------
 
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
     service: "Busyness API",
   });
+});
+
+app.get("/api/health/db", async (req, res) => {
+  const result = await checkConnection();
+  if (result.ok) {
+    res.json({ status: "ok", database: "connected" });
+  } else {
+    // Only return a safe error code — never credentials or connection details
+    res.status(503).json({
+      status: "error",
+      database: "unreachable",
+      code: result.error,
+    });
+  }
 });
 
 // --- 404 handler ----------------------------------------------------------
