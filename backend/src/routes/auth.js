@@ -18,6 +18,7 @@ import { query } from "../db/pool.js";
 import { withTransaction } from "../utils/transaction.js";
 import { hashPassword, comparePassword } from "../utils/password.js";
 import { signToken } from "../utils/jwt.js";
+import { authenticateToken } from "../middleware/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { BadRequestError, UnauthorizedError, ConflictError } from "../utils/errors.js";
 
@@ -192,6 +193,27 @@ router.post(
         name: user.name,
         role: user.role,
       },
+    });
+  })
+);
+
+// --- GET /api/auth/me --------------------------------------------------
+
+router.get(
+  "/me",
+  authenticateToken,
+  asyncHandler(async (req, res) => {
+    const result = await query(
+      `SELECT b.id, b.name, b.currency, bm.role as membership_role
+       FROM business_memberships bm
+       JOIN businesses b ON b.id = bm.business_id
+       WHERE bm.user_id = $1
+       ORDER BY bm.created_at`,
+      [req.user.userId]
+    );
+    res.json({
+      user: req.user,
+      businesses: result.rows,
     });
   })
 );
