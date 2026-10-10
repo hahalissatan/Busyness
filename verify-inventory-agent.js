@@ -26,8 +26,87 @@ let pass = 0;
 let fail = 0;
 const failures = [];
 
+// Track test-created UUIDs for safe cleanup (by exact ID, not by name pattern)
+const cleanupData = { businessIds: [], emails: [] };
+
 function ok(msg) { pass++; console.log(`  \u2713 ${msg}`); }
 function bad(msg, detail) { fail++; failures.push(`${msg} - ${detail || ""}`); console.log(`  \u2717 ${msg}`); if (detail) console.log(`    -> ${detail}`); }
+
+/**
+ * Safe cleanup: deletes test data by exact UUID in FK-safe order.
+ * - agent_runs (cascades agent_run_steps, approval_requests)
+ * - products (sets supplier_id NULL via FK)
+ * - suppliers
+ * - businesses (cascades business_memberships)
+ * - users (by exact email)
+ *
+ * KNOWN LIMITATION: businesses and users with audit_logs referencing them
+ * CANNOT be deleted. The audit_logs FK uses ON DELETE SET NULL, which
+ * triggers an UPDATE on audit_logs. The prevent_update_delete() trigger
+ * (migration 007) blocks ALL UPDATEs on audit_logs, so the SET NULL action
+ * fails, which causes the business/user DELETE to fail.
+ *
+ * This is a schema design conflict, not a test bug. The cleanup function
+ * catches the error and continues, so agent_runs, products, and suppliers
+ * are still cleaned up. Only businesses/users with audit_logs remain.
+ *
+ * audit_logs and stock_movements are trigger-protected and CANNOT be deleted.
+ * No stock_movements are created by this test suite.
+ */
+async function cleanupTestData() {
+  if (cleanupData.businessIds.length === 0 && cleanupData.emails.length === 0) return;
+
+  let query;
+  try {
+    const pool = await import("./backend/src/db/pool.js");
+    query = pool.query;
+  } catch {
+    console.log("  [cleanup] Could not connect to DB — skipping cleanup");
+    return;
+  }
+
+  let deletedAgentRuns = 0;
+  let deletedProducts = 0;
+  let deletedSuppliers = 0;
+  let deletedBusinesses = 0;
+  let deletedUsers = 0;
+  let auditBlockedBusinesses = 0;
+  let auditBlockedUsers = 0;
+
+  for (const bid of cleanupData.businessIds) {
+    try {
+      // Delete in FK-safe order: child tables first, parent last
+      const arRes = await query("DELETE FROM agent_runs WHERE business_id = $1", [bid]);
+      deletedAgentRuns += arRes.rowCount || 0;
+      const pRes = await query("DELETE FROM products WHERE business_id = $1", [bid]);
+      deletedProducts += pRes.rowCount || 0;
+      const sRes = await query("DELETE FROM suppliers WHERE business_id = $1", [bid]);
+      deletedSuppliers += sRes.rowCount || 0;
+      await query("DELETE FROM businesses WHERE id = $1", [bid]);
+      deletedBusinesses++;
+    } catch {
+      // Business deletion fails if audit_logs reference it (trigger blocks SET NULL)
+      auditBlockedBusinesses++;
+    }
+  }
+
+  for (const email of cleanupData.emails) {
+    try {
+      await query("DELETE FROM users WHERE email = $1", [email]);
+      deletedUsers++;
+    } catch {
+      // User deletion fails if audit_logs reference it (trigger blocks SET NULL)
+      auditBlockedUsers++;
+    }
+  }
+
+  console.log(`  [cleanup] Removed: ${deletedAgentRuns} agent_runs, ${deletedProducts} products, ${deletedSuppliers} suppliers`);
+  console.log(`  [cleanup] Removed: ${deletedBusinesses}/${cleanupData.businessIds.length} businesses, ${deletedUsers}/${cleanupData.emails.length} users`);
+  if (auditBlockedBusinesses > 0 || auditBlockedUsers > 0) {
+    console.log(`  [cleanup] ${auditBlockedBusinesses} business(es) and ${auditBlockedUsers} user(s) could not be deleted (audit_logs trigger blocks ON DELETE SET NULL)`);
+  }
+  console.log("  [cleanup] audit_logs remain (trigger-protected, orphaned with NULL FK)");
+}
 
 async function main() {
   console.log("\n======================================================");
@@ -59,6 +138,10 @@ async function main() {
   const token = regData.token;
   const businessId = regData.business.id;
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+
+  // Track for cleanup
+  cleanupData.businessIds.push(businessId);
+  cleanupData.emails.push(email);
 
   ok(`Demo session created (business: ${businessId.slice(0, 8)}...)`);
 
@@ -434,6 +517,12 @@ async function main() {
   const reg2Data = await reg2Res.json();
   const businessId2 = reg2Data.business?.id;
 
+  // Track for cleanup
+  if (businessId2) {
+    cleanupData.businessIds.push(businessId2);
+    cleanupData.emails.push(email2);
+  }
+
   const crossRes = await fetch(`${BASE}/api/businesses/${businessId2}/agent/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -802,10 +891,17 @@ async function main() {
     failures.forEach(f => console.log(`    - ${f}`));
   }
   console.log("");
+
+  // Clean up test data (safe — by exact UUID, FK-safe order)
+  console.log("--- Cleanup: Removing test data ---\n");
+  await cleanupTestData();
+
   process.exit(fail > 0 ? 1 : 0);
 }
 
-main().catch(err => {
+main().catch(async (err) => {
   console.error("Fatal error:", err);
+  console.log("\n--- Cleanup: Removing test data (after error) ---\n");
+  await cleanupTestData();
   process.exit(1);
 });

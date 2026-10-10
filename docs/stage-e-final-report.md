@@ -1,10 +1,10 @@
 # Stage E — Final Verification Report & Decision Gate
 
 **Project:** Busyness (BizPilot AI)
-**Phases verified:** A (Implementation), B (Browser), C (Security), D (WorkBuddy runtime investigation), 10A (Production Readiness Audit), 10B Stage 2 (Inventory Specialist Agent MVP)
+**Phases verified:** A (Implementation), B (Browser), C (Security), D (WorkBuddy runtime investigation), 10A (Production Readiness Audit), 10B Stage 2 (Inventory Specialist Agent MVP), 10B Stage 3 (Integration Review), 10B Stage 4 (Final Acceptance)
 **Author:** WorkBuddy assistant
-**Date:** 2026-10-11 (Phase 10B Stage 2 update)
-**Status:** ✅ Inventory Specialist Agent implemented and verified — 4 new read-only capabilities added, all regression tests pass
+**Date:** 2026-10-11 (Phase 10B Stage 4 update)
+**Status:** ✅ ACCEPT WITH LIMITATIONS — Inventory Specialist Agent verified, 222 assertions across 4 suites, cleanup function added, all critical fixes confirmed
 
 ---
 
@@ -625,3 +625,168 @@ Created a supplier and 7 products with controlled expiry dates and supplier assi
 - ✅ **Failures produce accurate statuses** — step-level errors set `status='failed'`; catastrophic errors set run `status='failed'`
 - ✅ **Audit records identify intent and source** — `changes` JSON includes `intent.id` and `source` ("inventoryAgent" or "coordinator")
 - ✅ **No UI changes** — frontend design, themes, chat, voice, file selection all unchanged
+
+---
+
+## 15. Phase 10B Stage 4 — Inventory Agent Final Acceptance
+
+### Overview
+
+Final data-integrity and acceptance check. Verified test-data cleanup behavior, database integrity, leftover data from previous runs, critical fix re-verification, runtime configuration, and full regression. A safe cleanup function was added to the test suite to prevent future data accumulation.
+
+### 1. Test-Fixture Lifecycle Analysis
+
+**How test data is created:**
+- `verify-inventory-agent.js` creates a new business via `POST /api/auth/register` with timestamp-based email (`inv-agent-${Date.now()}@busyness.app`)
+- Creates a second business for cross-business testing (`inv-agent2-*@busyness.app`)
+- Test 10 creates 1 supplier + 7 products with controlled expiry dates
+- Each goal submission creates an `agent_run` with `agent_run_steps` and `audit_logs`
+- Approximately 15+ agent runs per test execution
+
+**FK deletion constraints (verified from migrations 001, 003, 006, 007):**
+
+| Table | FK to businesses | ON DELETE | Deletable? |
+|-------|------------------|----------|------------|
+| `agent_runs` | RESTRICT | Blocks business delete until runs removed | ✅ Yes |
+| `products` | RESTRICT | Blocks business delete until products removed | ✅ Yes |
+| `suppliers` | RESTRICT | Blocks business delete until suppliers removed | ✅ Yes |
+| `stock_movements` | RESTRICT | Blocks business delete | ✅ Yes (test creates none) |
+| `business_memberships` | CASCADE | Auto-deleted with business | ✅ Yes |
+| `audit_logs` | SET NULL | Should set business_id=NULL | ❌ **BLOCKED by trigger** |
+| `audit_logs` (user_id) | SET NULL | Should set user_id=NULL | ❌ **BLOCKED by trigger** |
+
+**Safe deletion order:** agent_runs → products → suppliers → businesses → users
+
+### 2. Leftover Test Data from Previous Runs
+
+**Probe results (read-only, no deletions performed):**
+
+| Run | Business | Products | Suppliers | Agent Runs | Audit Logs | Stock Movements |
+|-----|----------|----------|-----------|------------|------------|-----------------|
+| Run 1 (17:51) | Inventory Test | 0 | 0 | 23 | 47 | 0 |
+| Run 1 (17:51) | Cross Business | 0 | 0 | 0 | 0 | 0 |
+| Run 2 (18:05) | Inventory Test | 7 | 1 | 28 | 57 | 0 |
+| Run 2 (18:05) | Cross Business | 0 | 0 | 0 | 0 | 0 |
+
+**Totals at time of probe:** 4 users, 4 businesses, 7 products, 1 supplier, 51 agent runs, 104 audit logs (trigger-protected, cannot be deleted), 0 stock movements.
+
+**Key finding:** No stock_movements exist — safe deletion path is available for all other tables except those referenced by audit_logs.
+
+### 3. Schema Design Conflict Discovered (audit_logs trigger vs ON DELETE SET NULL)
+
+**Critical finding:** The `prevent_update_delete()` trigger (migration 007) blocks ALL UPDATEs on `audit_logs`, including the `ON DELETE SET NULL` FK action. When PostgreSQL tries to delete a business with audit_logs, it performs `UPDATE audit_logs SET business_id = NULL WHERE business_id = X`, which the trigger blocks, causing the entire business DELETE to fail.
+
+**Impact:**
+- Businesses with audit_logs CANNOT be deleted
+- Users with audit_logs CANNOT be deleted
+- This is a schema design conflict, not a code defect
+- No schema modifications were made (per user instruction: "Do not modify schema objects")
+
+**Verification:** The debug script confirmed the error: `Table audit_logs is append-only: UPDATE and DELETE are not allowed` during business deletion.
+
+### 4. Safe Cleanup Function Added
+
+A cleanup function was added to `verify-inventory-agent.js` that:
+- Runs on both success and failure paths (try/finally pattern in main + catch handler)
+- Deletes by exact UUID (not by name pattern or date assumption)
+- Follows FK-safe deletion order: agent_runs → products → suppliers → businesses → users
+- Catches errors gracefully — partial cleanup is better than none
+- Reports exactly what was and wasn't deleted
+
+**Cleanup results from latest test run:**
+- ✅ Deleted: agent_runs (cascades steps/approvals), products, suppliers
+- ✅ Deleted: 1/2 businesses (the Cross Business with 0 audit_logs)
+- ❌ Could not delete: 1/2 businesses (Inventory Test Business with audit_logs)
+- ❌ Could not delete: 1/2 users (user with audit_logs)
+- ℹ️ audit_logs remain (trigger-protected, orphaned with NULL FK after business_id is set to NULL by the FK action... actually the FK action itself is blocked, so the business_id remains non-NULL in orphaned audit_logs)
+
+**What the cleanup prevents:** Future test runs will no longer accumulate agent_runs, products, or suppliers. Only businesses and users with audit_logs will accumulate (reduced from full data accumulation to just business/user records).
+
+### 5. Critical Fix Re-Verification (Stage 3 Fixes)
+
+All 4 Stage 3 fixes were re-verified with the fresh server and test data:
+
+| Fix | Test Assertion | Result |
+|-----|---------------|--------|
+| DATE type handling (to_char) | `near_expiry: expiry_date is YYYY-MM-DD string: "2020-01-01"` | ✅ Pass |
+| DATE type handling (classification) | `near_expiry: 'Expired Widget' correctly classified as expired` | ✅ Pass |
+| DATE type handling (boundary) | `near_expiry: 'Today Product' correctly in expiring_soon` | ✅ Pass |
+| Pattern collision fix | `'show product count' → matches inventory_summary only` | ✅ Pass |
+| ILIKE wildcard escaping | `product_search: ILIKE wildcard '%' escaped — no false matches for '100% off'` | ✅ Pass |
+| Audit log source field | `Audit: step input.source is 'inventoryAgent'` | ✅ Pass |
+
+### 6. Runtime Configuration Verification
+
+| Config | Expected | Actual | Status |
+|--------|----------|--------|--------|
+| PORT | 3001 | 3001 | ✅ |
+| NODE_ENV | development | development | ✅ |
+| DATABASE_URL | Supabase PostgreSQL | Set in .env | ✅ |
+| JWT_SECRET | 256-char hex | Set in .env | ✅ |
+| JWT_EXPIRES_IN | 7d | 7d | ✅ |
+| CORS_ORIGIN | http://localhost:5173 | Set in .env | ✅ |
+| RATE_LIMIT_MAX | 100 | 100 (code default, .env not loaded at rateLimit.js import time) | ⚠️ Harmless |
+| RATE_LIMIT_AUTH_MAX | 10 | 10 (code default, .env not loaded at rateLimit.js import time) | ⚠️ Harmless |
+| DB SSL | Auto-detect | Auto-detect (SSL for non-localhost) | ✅ |
+| Pool max | 10 | 10 | ✅ |
+| Graceful shutdown | SIGTERM/SIGINT/uncaughtException/unhandledRejection | All handlers present in index.js | ✅ |
+
+**dotenv loading order (unfixed, from Phase 10A):** `rateLimit.js` is imported at line 23 of `app.js`, BEFORE any route file that imports `pool.js` (where `dotenv.config()` is called). So `process.env.RATE_LIMIT_*` variables from `.env` are `undefined` when `rateLimit.js` reads them. The code falls back to defaults (100 general, 10 auth). Currently harmless because defaults match `.env` values. **Not fixed** — no code changes made in Stage 4 per scope constraints.
+
+### 7. Final Regression Results
+
+| Suite | Type | Assertions | Passed | Failed |
+|-------|------|-----------|--------|--------|
+| `verify-inventory-agent.js` | Inventory agent + data | 82 | 82 | 0 |
+| `verify-stage-a.js` | Coordinator regression | 88 | 88 | 0 |
+| `verify-scope-safety.js` | Scope & safety | 16 | 16 | 0 |
+| `verify-stage-c.js` | Security & audit | 36 | 36 | 0 |
+| Frontend production build | Regression | — | success | — |
+
+**Total: 222 passing assertions across 4 test suites + 1 successful production build. All green.**
+
+### 8. Files Changed (Stage 4)
+
+| File | Change |
+|------|--------|
+| `verify-inventory-agent.js` | Added `cleanupData` tracking object, `cleanupTestData()` function, tracking calls after business creation, cleanup calls before exit in success/failure paths |
+| `docs/stage-e-final-report.md` | This section |
+
+### 9. Remaining Limitations (cumulative)
+
+1. **Timezone reliance on DB CURRENT_DATE** — `CURRENT_DATE` from PostgreSQL (UTC on Supabase) may not match business local date. Architectural, not a code defect.
+
+2. **`extractSearchTerm` is heuristic** — Strips patterns and filler words but may include unintended words. Acceptable for rule-based system.
+
+3. **dotenv loading order** (from Phase 10A, unfixed) — `RATE_LIMIT_AUTH_MAX` from `.env` not applied at runtime. Harmless (defaults match .env values).
+
+4. **No conversation history** — Each request is independent.
+
+5. **No per-business rate limiting** — Global 100/15min only.
+
+6. **Test data accumulation for businesses/users with audit_logs** — The `prevent_update_delete()` trigger blocks the `ON DELETE SET NULL` FK action on `audit_logs`, preventing deletion of businesses and users that have audit_logs. The cleanup function deletes agent_runs, products, and suppliers, but businesses/users with audit_logs remain. This is a schema design conflict, not a code defect. **Resolution requires schema modification (e.g., exempt FK SET NULL from the trigger, or change the FK to ON DELETE NO ACTION and manually NULL business_id before deleting). Not modified per user instruction.**
+
+7. **Leftover data from pre-cleanup test runs** — 4 businesses, 4 users, 7 products, 1 supplier, and 51 agent_runs from runs 1 and 2 remain in the database. These were created before the cleanup function existed. The products, suppliers, and agent_runs CAN be deleted (no trigger protection), but the businesses and users with audit_logs CANNOT. No broad DELETE statements were run per user instruction.
+
+### 10. Acceptance Recommendation
+
+**RECOMMENDATION: ACCEPT WITH LIMITATIONS**
+
+The Inventory Specialist Agent is functionally correct, secure, and ready for use. All 4 critical Stage 3 fixes are verified with real data. All 222 test assertions pass across 4 test suites. The frontend builds cleanly. The cleanup function prevents future accumulation of agent_runs, products, and suppliers.
+
+**Limitations accepted:**
+- Businesses and users with audit_logs cannot be deleted (schema design conflict — trigger blocks FK SET NULL action)
+- dotenv loading order unfixed (harmless — defaults match .env values)
+- Leftover test data from pre-cleanup runs remains (per user instruction, no broad deletes)
+- No timezone awareness for CURRENT_DATE
+
+**What was verified:**
+- ✅ Test-fixture lifecycle fully traced (creation, FK constraints, trigger protections)
+- ✅ Leftover data identified and reported (no blind deletes)
+- ✅ Safe cleanup function added (by exact UUID, FK-safe order, runs on success/failure)
+- ✅ All 4 Stage 3 fixes re-verified with fresh server and real data
+- ✅ Runtime configuration confirmed (rate limits, auth, dotenv, SSL, graceful shutdown)
+- ✅ All 4 test suites pass (222 assertions, 0 failures)
+- ✅ Frontend production build succeeds
+- ✅ No schema modifications made
+- ✅ No new capabilities, LLM provider, write operations, or dependencies added
