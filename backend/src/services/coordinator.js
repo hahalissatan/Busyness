@@ -22,6 +22,7 @@
 
 import { randomUUID } from "crypto";
 import { query } from "../db/pool.js";
+import { INVENTORY_INTENTS, getInventoryIntentIds } from "./inventoryAgent.js";
 
 // --- Intent Registry ----------------------------------------------------
 
@@ -275,6 +276,10 @@ const INTENT_REGISTRY = [
   },
 ];
 
+// Combined registry: existing 7 intents + inventory specialist agent intents.
+// Must be declared AFTER INTENT_REGISTRY is defined.
+const ALL_INTENTS = [...INTENT_REGISTRY, ...INVENTORY_INTENTS];
+
 // --- Intent Matching ----------------------------------------------------
 
 /**
@@ -289,7 +294,7 @@ export function matchIntents(goalText) {
   const lower = goalText.toLowerCase().trim();
 
   const matched = [];
-  for (const intent of INTENT_REGISTRY) {
+  for (const intent of ALL_INTENTS) {
     if (intent.patterns.some((p) => lower.includes(p))) {
       matched.push(intent);
     }
@@ -335,6 +340,55 @@ function formatStepSummary(intent, output) {
     case "marketing_overview":
       return `Marketing: ${output.total_projects} projects (${output.active} active, ${output.draft} draft, ${output.completed} completed). ${output.total_drafts} drafts, ${output.total_pitch_decks} pitch decks.`;
 
+    // --- Inventory Specialist Agent intents ---
+
+    case "product_search":
+      if (output.search_term === null) {
+        return output.message || "Please specify a product name or SKU to search for.";
+      }
+      if (output.count === 0) {
+        return `No products found matching "${output.search_term}". Try a different name or SKU.`;
+      }
+      const psItems = output.items.slice(0, 5).map((i) =>
+        `  • ${i.name} (SKU: ${i.sku || "N/A"}) — ${i.stock_quantity} in stock, cost $${parseFloat(i.unit_cost || 0).toFixed(2)}`
+      ).join("\n");
+      const psExtra = output.count > 5 ? `\n  ...and ${output.count - 5} more.` : "";
+      return `Found ${output.count} product(s) matching "${output.search_term}":\n${psItems}${psExtra}`;
+
+    case "near_expiry":
+      if (output.expired_count === 0 && output.expiring_soon_count === 0) {
+        return "No products have expiry dates within the next 7 days, and no products have already expired.";
+      }
+      const expiredItems = output.expired.slice(0, 5).map((i) =>
+        `  • ${i.name} (SKU: ${i.sku || "N/A"}) — expired on ${i.expiry_date}, ${i.stock_quantity} in stock`
+      ).join("\n");
+      const soonItems = output.expiring_soon.slice(0, 5).map((i) =>
+        `  • ${i.name} (SKU: ${i.sku || "N/A"}) — expires on ${i.expiry_date}, ${i.stock_quantity} in stock`
+      ).join("\n");
+      const parts = [];
+      if (output.expired_count > 0) {
+        parts.push(`${output.expired_count} expired product(s):\n${expiredItems}`);
+      }
+      if (output.expiring_soon_count > 0) {
+        parts.push(`${output.expiring_soon_count} product(s) expiring within 7 days:\n${soonItems}`);
+      }
+      return parts.join("\n\n");
+
+    case "stock_movement_history":
+      if (output.count === 0) return "No stock movements have been recorded yet.";
+      const smItems = output.movements.slice(0, 5).map((m) =>
+        `  • ${m.product_name} (SKU: ${m.product_sku || "N/A"}) — ${m.movement_type} ${m.quantity_change > 0 ? "+" : ""}${m.quantity_change} on ${new Date(m.created_at).toLocaleDateString()}`
+      ).join("\n");
+      const smExtra = output.count > 5 ? `\n  ...and ${output.count - 5} more.` : "";
+      return `Recent stock movements (${output.count} total):\n${smItems}${smExtra}`;
+
+    case "inventory_by_supplier":
+      if (output.count === 0) return "No products found in inventory.";
+      const supItems = output.suppliers.slice(0, 8).map((s) =>
+        `  • ${s.supplier_name}: ${s.product_count} products, ${s.total_stock} units, value $${parseFloat(s.total_value || 0).toFixed(2)}`
+      ).join("\n");
+      return `Inventory by supplier (${output.count} groups):\n${supItems}`;
+
     default:
       return "Operation completed.";
   }
@@ -344,6 +398,10 @@ function formatFallbackResponse(goal) {
   return `I couldn't find a specific action for "${goal}". Here's what I can help with:\n\n` +
     "  • \"show low stock\" — list products at or below reorder level\n" +
     "  • \"inventory summary\" — total products, value, and stock status\n" +
+    "  • \"find product [name]\" — search products by name, SKU, or description\n" +
+    "  • \"near expiry\" — products that are expired or expiring within 7 days\n" +
+    "  • \"stock movement\" — recent stock movement history\n" +
+    "  • \"by supplier\" — inventory value grouped by supplier\n" +
     "  • \"task overview\" — pending, active, completed, and overdue tasks\n" +
     "  • \"team workload\" — per-member task assignments and capacity\n" +
     "  • \"financial overview\" — invoices, revenue, and outstanding amounts\n" +
@@ -388,7 +446,7 @@ export async function runCoordinator({ businessId, userId, goal }) {
       const fallbackReport = {
         summary: formatFallbackResponse(goal),
         matched_intents: [],
-        capabilities: INTENT_REGISTRY.map((i) => i.id),
+        capabilities: [...INTENT_REGISTRY.map((i) => i.id), ...getInventoryIntentIds()],
       };
 
       await query(
@@ -420,7 +478,7 @@ export async function runCoordinator({ businessId, userId, goal }) {
     for (let i = 0; i < intents.length; i++) {
       const intent = intents[i];
       const stepId = randomUUID();
-      const stepInput = { intent: intent.id, label: intent.label };
+      const stepInput = { intent: intent.id, label: intent.label, source: intent.source || "coordinator" };
 
       // Create step record (pending)
       await query(
@@ -438,7 +496,9 @@ export async function runCoordinator({ businessId, userId, goal }) {
         );
 
         // Execute the real query
-        const { output, evidence } = await intent.execute(businessId);
+        // Pass goal so inventory intents (e.g. product_search) can extract
+        // a search term from the user's natural-language input.
+        const { output, evidence } = await intent.execute(businessId, goal);
 
         const stepOutput = { ...output, _summary: formatStepSummary(intent, output) };
 
@@ -460,7 +520,7 @@ export async function runCoordinator({ businessId, userId, goal }) {
             `agent_step_${intent.id}`,
             intent.agent_type,
             stepId,
-            JSON.stringify({ intent: intent.id, evidence }),
+            JSON.stringify({ intent: intent.id, source: intent.source || "coordinator", evidence }),
           ]
         );
 
@@ -494,7 +554,7 @@ export async function runCoordinator({ businessId, userId, goal }) {
             `agent_step_${intent.id}_failed`,
             intent.agent_type,
             stepId,
-            JSON.stringify({ intent: intent.id, error: errorMsg }),
+            JSON.stringify({ intent: intent.id, source: intent.source || "coordinator", error: errorMsg }),
           ]
         );
 

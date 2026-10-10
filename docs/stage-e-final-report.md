@@ -1,10 +1,10 @@
 # Stage E — Final Verification Report & Decision Gate
 
 **Project:** Busyness (BizPilot AI)
-**Phases verified:** A (Implementation), B (Browser), C (Security), D (WorkBuddy runtime investigation), 10A (Production Readiness Audit)
+**Phases verified:** A (Implementation), B (Browser), C (Security), D (WorkBuddy runtime investigation), 10A (Production Readiness Audit), 10B Stage 2 (Inventory Specialist Agent MVP)
 **Author:** WorkBuddy assistant
-**Date:** 2026-10-12
-**Status:** ✅ Ready for review — production readiness audit complete, coordinator verified read-only, NO specialist-agent work has been started
+**Date:** 2026-10-11 (Phase 10B Stage 2 update)
+**Status:** ✅ Inventory Specialist Agent implemented and verified — 4 new read-only capabilities added, all regression tests pass
 
 ---
 
@@ -414,3 +414,86 @@ The coordinator is **ready for continued development use** with no further code 
 **Decision: GO WITH LIMITATIONS** — safe for development and internal use. Not yet ready for public deployment without infrastructure work.
 
 Awaiting your decision on the five questions in Section 10.
+
+---
+
+## 13. Phase 10B Stage 2 — Inventory Specialist Agent MVP
+
+### Overview
+
+Implemented the Inventory Specialist Agent as a new module (`inventoryAgent.js`) that extends the coordinator with 4 read-only inventory capabilities. The coordinator now delegates inventory-specific intents to this specialist agent via a combined registry pattern, while preserving all 7 existing intents' behavior unchanged.
+
+### New Capabilities
+
+| Intent | Agent type | Source | Patterns | Query | Output |
+|--------|-----------|--------|----------|-------|--------|
+| `product_search` | inventory | inventoryAgent | find product, search product, look up product, show product, product details, product info | `SELECT ... FROM products WHERE business_id=$1 AND (name/sku/description ILIKE $term) LIMIT 20` | items[], count, search_term |
+| `near_expiry` | inventory | inventoryAgent | near expiry, expiring, about to expire, expire soon, expiry date, expiring soon | `SELECT ... WHERE expiry_date <= CURRENT_DATE + INTERVAL '7 days'` | expired[], expiring_soon[], expired_count, expiring_soon_count, days_threshold |
+| `stock_movement_history` | inventory | inventoryAgent | stock movement, recent movement, stock history, stock changes, movement history | `SELECT ... FROM stock_movements JOIN products ORDER BY created_at DESC LIMIT 20` | movements[], count |
+| `inventory_by_supplier` | inventory | inventoryAgent | by supplier, supplier breakdown, supplier inventory, inventory by supplier, supplier summary | `SELECT ... FROM products LEFT JOIN suppliers GROUP BY supplier ORDER BY total_value DESC` | suppliers[], count |
+
+### Design Risk Resolutions
+
+| Risk | Resolution | Verified |
+|------|-----------|----------|
+| Already-expired products described as "expiring soon" | Single SQL query returns all products with `expiry_date <= today + 7 days`. JS splits into `expired` (date < today) and `expiring_soon` (date >= today). Summary uses distinct terminology: "expired" vs "expiring within 7 days" | ✅ Test 2 |
+| Products without supplier appear in unlabelled group | `COALESCE(s.name, 'No Supplier')` — products with NULL supplier_id get a clearly labelled "No Supplier" group | ✅ Test 4 |
+| Search executes without a reliable search term | `extractSearchTerm()` strips pattern phrases + filler words, rejects terms < 2 chars. Returns null → clarification message shown | ✅ Test 1 |
+| Pattern collisions between old and new intents | Distinct patterns — "low stock" matches low_stock only, "inventory summary" matches inventory_summary only, no overlap with new intents | ✅ Test 5 |
+| All 7 existing intents' behavior preserved | `ALL_INTENTS = [...INTENT_REGISTRY, ...INVENTORY_INTENTS]` — existing intents unchanged. Execute call: `intent.execute(businessId, goal)` — existing intents ignore the `goal` parameter | ✅ Test 9 |
+
+### Delegation Architecture
+
+```
+User goal → coordinator.matchIntents(goal)
+  → iterates ALL_INTENTS (7 original + 4 inventory)
+  → matched intent.execute(businessId, goal)
+    → original 7 intents: execute(businessId) — goal ignored
+    → inventory intents: execute(businessId, goal) — goal used for search term extraction
+  → step input records source: "coordinator" or "inventoryAgent"
+```
+
+### Files Changed
+
+| File | Lines | Change |
+|------|-------|--------|
+| `backend/src/services/inventoryAgent.js` (NEW) | ~310 | 4 read-only inventory intents with execute(businessId, goal), extractSearchTerm helper, getInventoryIntentIds export |
+| `backend/src/services/coordinator.js` (MODIFIED) | 6 changes | Import inventoryAgent, ALL_INTENTS combined array, matchIntents uses ALL_INTENTS, execute passes goal, step input source field, 4 new formatStepSummary cases + updated fallback |
+| `verify-inventory-agent.js` (NEW) | ~570 | 9-section test suite — 59 assertions |
+
+### Test Results
+
+| Suite | Type | Assertions | Passed | Failed |
+|-------|------|-----------|--------|--------|
+| `verify-inventory-agent.js` | NEW | 59 | 59 | 0 |
+| `verify-stage-a.js` | Regression | 88 | 88 | 0 |
+| `verify-scope-safety.js` | Regression | 16 | 16 | 0 |
+| `verify-stage-b.js` | Regression | 37 | 37 | 0 |
+| Frontend production build | Regression | — | success | — |
+
+**Total: 200 passing assertions across 4 test suites + 1 successful production build.**
+
+### Inventory Agent Test Coverage (59 assertions)
+
+| Section | Tests | What's verified |
+|---------|-------|----------------|
+| Test 1: product_search | 13 | 3 patterns matched, output structure (search_term, count, items), evidence source, agent_type, source field, summary, no-search-term handling, short-term rejection, empty results |
+| Test 2: near_expiry | 8 | 2 patterns matched, expired/expiring_soon separation, counts, days_threshold=7, evidence source, empty results, summary terminology |
+| Test 3: stock_movement_history | 6 | 2 patterns matched, output structure (movements, count), evidence source, empty results |
+| Test 4: inventory_by_supplier | 6 | 2 patterns matched, output structure (suppliers, count), evidence source, "No Supplier" group, empty results |
+| Test 5: Pattern collisions & multi-intent | 7 | No collisions (low stock→low_stock only, inventory summary→inventory_summary only), multi-intent matching (2+ intents), unmatched query fallback, fallback lists new capabilities |
+| Test 6: Auth & isolation | 2 | No token → 401, cross-business → 403 |
+| Test 7: Read-only enforcement | 3 | PUT/PATCH/DELETE → 404 |
+| Test 8: Run/step/audit status | 6 | Run completed, step completed, all steps have evidence, matched_intents in final_report, GET run retrieves steps |
+| Test 9: Regression — 7 existing intents | 7 | All 7 original intents still match and execute correctly |
+
+### Confirmations
+
+- ✅ **No database schema changes** — no new migrations, no ALTER TABLE, no CREATE TABLE
+- ✅ **No write operations** — all 4 new intents execute SELECT queries only
+- ✅ **No security relaxations** — no rate limit changes, no auth bypass, no CORS changes
+- ✅ **No new dependencies** — `inventoryAgent.js` uses existing `pg` client only
+- ✅ **All queries business-scoped** — every SQL query includes `WHERE business_id = $1`
+- ✅ **All queries parameterized** — `$1`, `$2` placeholders, no string interpolation
+- ✅ **Delegation identity recorded** — `source: "inventoryAgent"` in step input for audit trail
+- ✅ **Existing intents unchanged** — 88/88 Stage A assertions still pass
