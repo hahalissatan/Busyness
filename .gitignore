@@ -1,0 +1,39 @@
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Environment & secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- Build output ---
+dist/
+build/
+*.tsbuildinfo
+
+# --- Logs ---
+logs/
+*.log
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Test / coverage ---
+coverage/
+.nyc_output/
+
+# --- WorkBuddy internal ---
+.workbuddy-ai/
