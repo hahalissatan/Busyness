@@ -10,9 +10,17 @@
  * Props let each module customise the title, accent, and feature list.
  * `messages` (optional) renders a chat thread above the feature cards.
  *
- * Chat is wired to the backend coordinator agent:
- *   POST /api/businesses/:businessId/agent/runs { goal }
- * Returns real database query results scoped to the authenticated business.
+ * Chat is wired to the backend conversational AI endpoint:
+ *   POST /api/businesses/:businessId/agent/chat { message, context }
+ * Returns natural-language responses with conversation context support.
+ *
+ * The conversational endpoint supports:
+ *   - Greetings and small talk
+ *   - Follow-up questions (uses conversation context)
+ *   - Data-backed questions (real database queries scoped to business)
+ *   - Clarification requests for ambiguous input
+ *
+ * A small badge shows whether the provider is "mock" or "live".
  */
 
 import { useState } from "react";
@@ -33,6 +41,7 @@ export function ModulePage({
   const { business } = useAuth();
   const [thread, setThread] = useState([]);
   const [thinking, setThinking] = useState(false);
+  const [providerInfo, setProviderInfo] = useState(null);
 
   const handleAsk = async (question) => {
     // If a module provides a custom onAsk, use it (future specialist routing)
@@ -44,19 +53,35 @@ export function ModulePage({
       }
     }
 
-    // Call the backend coordinator agent
+    // Call the backend conversational AI endpoint
+    // Send conversation context (prior messages) for follow-up support
     setThinking(true);
     try {
-      const res = await api.post(`/api/businesses/${business?.id}/agent/runs`, {
-        goal: question,
+      // Build context from current thread for the API
+      const context = thread.map((m) => ({
+        role: m.role,
+        content: m.text,
+      }));
+
+      const res = await api.post(`/api/businesses/${business?.id}/agent/chat`, {
+        message: question,
+        context,
       });
 
-      const summary = res?.final_report?.summary || "No response from coordinator.";
+      const reply = res?.reply || "No response from assistant.";
+
+      // Track provider info for display
+      if (res?.provider) {
+        setProviderInfo({
+          provider: res.provider,
+          isLive: res.is_live || false,
+        });
+      }
 
       setThread((t) => [
         ...t,
         { role: "user", text: question },
-        { role: "assistant", text: summary },
+        { role: "assistant", text: reply },
       ]);
     } catch (err) {
       setThread((t) => [
@@ -116,6 +141,19 @@ export function ModulePage({
                 <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse" style={{ animationDelay: "300ms" }} />
                 <span className="ml-1">Processing your request…</span>
               </div>
+            </div>
+          )}
+          {/* Provider badge */}
+          {providerInfo && (
+            <div className="text-center">
+              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                providerInfo.isLive
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/20 dark:text-emerald-300"
+                  : "bg-amber-100 text-amber-700 dark:bg-amber-400/20 dark:text-amber-300"
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${providerInfo.isLive ? "bg-emerald-500" : "bg-amber-500"}`} />
+                {providerInfo.isLive ? "Live LLM" : "Mock AI"}
+              </span>
             </div>
           )}
         </div>

@@ -16,7 +16,7 @@ INSERT INTO businesses (id, name, currency) VALUES
   ('11111111-1111-1111-1111-111111111111', 'Demo Trading Sdn Bhd', 'MYR');
 
 INSERT INTO users (id, email, password_hash, name, role) VALUES
-  ('22222222-2222-2222-2222-222222222222', 'owner@demo.busyness', 'bcrypt_hash_placeholder', 'Ahmad Rahman', 'owner');
+  ('22222222-2222-2222-2222-222222222222', 'owner@demo.busyness', '$2b$10$aGnrONkuQUY9uwweT3u9iuqHnbc4gjpii4stCHF59yxwMkcNQdITK', 'Ahmad Rahman', 'owner');
 
 INSERT INTO business_memberships (user_id, business_id, role) VALUES
   ('22222222-2222-2222-2222-222222222222', '11111111-1111-1111-1111-111111111111', 'owner');

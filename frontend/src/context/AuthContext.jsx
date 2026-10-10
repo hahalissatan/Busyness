@@ -1,14 +1,15 @@
 /**
  * AuthContext — auto demo session. No login UI.
  *
- * On first load, if no token exists, we register a hidden demo user
- * against the backend and store the resulting token + business in
- * localStorage. This keeps all API contracts intact (the backend still
- * requires a JWT) while removing the login barrier for the user.
+ * On first load, if no token exists, we try to log in as the seeded
+ * demo user (owner@demo.busyness) which has pre-loaded sample data
+ * (customers, products, invoices, tasks, etc.). If that fails (e.g.
+ * the database hasn't been seeded), we fall back to registering a
+ * fresh demo user with a new empty business.
  *
- * Users who want to identify themselves can replace the demo session
- * by calling `replaceSession(token, user, business)` — left here for
- * future use (e.g. team collaboration features).
+ * The token + business are stored in localStorage so the session
+ * persists across reloads. Users who want to identify themselves can
+ * replace the session via `replaceSession(token, user, business)`.
  */
 
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
@@ -44,6 +45,35 @@ function randomSuffix() {
 }
 
 async function bootstrapDemo() {
+  // --- Strategy 1: Log in as the seeded demo user ---
+  // The seed data (owner@demo.busyness) comes with a full demo
+  // business: products, customers, invoices, tasks, marketing projects.
+  // Logging in as this user gives us access to all that data.
+  const SEED_EMAIL = "owner@demo.busyness";
+  const SEED_PASSWORD = "Demo1234!";
+
+  try {
+    const loginRes = await api.post("/api/auth/login", {
+      email: SEED_EMAIL,
+      password: SEED_PASSWORD,
+    });
+
+    // Login doesn't return business info, so fetch it via /api/auth/me
+    api.setToken(loginRes.token);
+    const meRes = await api.get("/api/auth/me");
+
+    if (meRes.businesses && meRes.businesses.length > 0) {
+      return {
+        token: loginRes.token,
+        user: loginRes.user,
+        business: meRes.businesses[0],
+      };
+    }
+  } catch {
+    // Seeded user doesn't exist or password is wrong — fall through to registration
+  }
+
+  // --- Strategy 2: Register a fresh demo user (empty business) ---
   const email = `demo-${randomSuffix()}@busyness.app`;
   const password = "Demo1234!";
   const name = "Demo User";
