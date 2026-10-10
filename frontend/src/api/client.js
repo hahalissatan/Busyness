@@ -9,6 +9,7 @@
  */
 
 const TOKEN_KEY = "busyness_token";
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -22,13 +23,19 @@ function buildHeaders(extra = {}) {
 }
 
 function buildUrl(path, params = {}) {
-  const url = new URL(path, window.location.origin);
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+  const url = API_BASE_URL
+    ? new URL(normalizedPath, `${API_BASE_URL}/`)
+    : new URL(normalizedPath, window.location.origin);
+
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== "") {
       url.searchParams.set(key, value);
     }
   }
-  return url.pathname + url.search;
+
+  return API_BASE_URL ? url.toString() : url.pathname + url.search;
 }
 
 async function request(method, path, { body, params } = {}) {
