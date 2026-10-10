@@ -10,6 +10,8 @@
     "db:seed": "npm --prefix backend run db:seed",
     "db:reset": "npm --prefix backend run db:reset",
     "db:status": "npm --prefix backend run db:status",
-    "db:health": "npm --prefix backend run db:health"
+    "db:health": "npm --prefix backend run db:health",
+    "test": "npm --prefix backend run test",
+    "test:watch": "npm --prefix backend run test:watch"
   }
 }

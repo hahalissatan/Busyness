@@ -1,60 +1,23 @@
-import express from "express";
-import { closePool, checkConnection } from "./db/pool.js";
+/**
+ * index.js — Server entry point.
+ *
+ * Imports the Express app from app.js and starts the HTTP server.
+ * Handles graceful shutdown on SIGTERM/SIGINT/uncaughtException/unhandledRejection.
+ *
+ * The app is defined in app.js so that tests can import it directly
+ * (via supertest) without binding to a port.
+ */
 
-const app = express();
-
-app.use(express.json());
+import app from "./app.js";
+import { closePool } from "./db/pool.js";
 
 const PORT = process.env.PORT || 3001;
-
-// --- Health checks --------------------------------------------------------
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "Busyness API",
-  });
-});
-
-app.get("/api/health/db", async (req, res) => {
-  const result = await checkConnection();
-  if (result.ok) {
-    res.json({ status: "ok", database: "connected" });
-  } else {
-    // Only return a safe error code — never credentials or connection details
-    res.status(503).json({
-      status: "error",
-      database: "unreachable",
-      code: result.error,
-    });
-  }
-});
-
-// --- 404 handler ----------------------------------------------------------
-
-app.use((req, res) => {
-  res.status(404).json({
-    error: "Not Found",
-    path: req.path,
-    method: req.method,
-  });
-});
-
-// --- Central error handler ------------------------------------------------
-
-app.use((err, req, res, next) => {
-  console.error("[ERROR]", err.message);
-  res.status(err.status || 500).json({
-    error: "Internal Server Error",
-    message: process.env.NODE_ENV === "production" ? undefined : err.message,
-  });
-});
-
-// --- Start server ---------------------------------------------------------
 
 const server = app.listen(PORT, () => {
   console.log(`Busyness API running on http://localhost:${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
+  console.log(`Auth: POST http://localhost:${PORT}/api/auth/register`);
+  console.log(`Auth: POST http://localhost:${PORT}/api/auth/login`);
 });
 
 // --- Graceful shutdown ----------------------------------------------------
