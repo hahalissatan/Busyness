@@ -8,6 +8,7 @@ export default function TasksHub() {
   return (
     <ModulePage
       title="Task AI"
+      module="tasks"
       chatPlaceholder="Ask about tasks, assignments, or team workload…"
       features={[
         {

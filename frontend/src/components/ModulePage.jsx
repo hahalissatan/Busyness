@@ -21,6 +21,7 @@ export function ModulePage({
   features = [],
   chatPlaceholder = "Ask anything…",
   onAsk,
+  module = "financial",
   children,
 }) {
   const [thread, setThread] = useState([]);
@@ -92,7 +93,7 @@ export function ModulePage({
 
       {/* Chat input pinned to page bottom area */}
       <div className="sticky bottom-4 mt-4">
-        <ChatInput onSend={handleAsk} placeholder={chatPlaceholder} />
+        <ChatInput onSend={handleAsk} placeholder={chatPlaceholder} module={module} />
       </div>
     </div>
   );

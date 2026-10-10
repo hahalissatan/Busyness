@@ -9,6 +9,7 @@ export default function FinancialHub() {
   return (
     <ModulePage
       title="Financial AI"
+      module="financial"
       chatPlaceholder="Ask about invoices, payments, customers…"
       features={[
         {

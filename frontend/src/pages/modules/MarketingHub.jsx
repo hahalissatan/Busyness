@@ -8,6 +8,7 @@ export default function MarketingHub() {
   return (
     <ModulePage
       title="Marketing AI"
+      module="marketing"
       chatPlaceholder="Ask about campaigns, personas, or pitch decks…"
       features={[
         {

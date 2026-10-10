@@ -8,6 +8,7 @@ export default function InventoryHub() {
   return (
     <ModulePage
       title="Inventory AI"
+      module="inventory"
       chatPlaceholder="Ask about stock, suppliers, or reorder points…"
       features={[
         {

@@ -74,10 +74,9 @@ export default function AppLayout({ children }) {
           <button
             onClick={() => navigate("/")}
             className="flex items-center gap-2"
+            aria-label="Busyness home"
           >
-            <span className="font-display font-bold tracking-[0.15em] text-lg text-gray-900 dark:text-white">
-              BUS<span className="inline-block">Y</span>NESS
-            </span>
+            <Logo size="sm" />
           </button>
         </div>
         <div className="hidden md:block">

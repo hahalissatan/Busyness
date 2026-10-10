@@ -46,8 +46,10 @@ async function request(method, path, { body, params } = {}) {
     // 401 → session expired or invalid token
     if (res.status === 401) {
       localStorage.removeItem(TOKEN_KEY);
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login?expired=1";
+      // Login was removed — redirect to landing page so the auto-demo-session
+      // in AuthContext can bootstrap a fresh session.
+      if (window.location.pathname !== "/") {
+        window.location.href = "/";
       }
     }
 
