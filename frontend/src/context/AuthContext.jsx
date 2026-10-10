@@ -1,140 +1,126 @@
 /**
- * AuthContext — manages JWT token, user info, and business context.
+ * AuthContext — auto demo session. No login UI.
  *
- * Token is stored in localStorage (busyness_token).
- * On mount, if a token exists, GET /api/auth/me verifies it and loads businesses.
+ * On first load, if no token exists, we register a hidden demo user
+ * against the backend and store the resulting token + business in
+ * localStorage. This keeps all API contracts intact (the backend still
+ * requires a JWT) while removing the login barrier for the user.
  *
- * Security trade-off: localStorage is accessible to XSS. This is the standard
- * SPA approach for JWT. HttpOnly cookies would require a backend change.
- * The backend enforces all authorization — the frontend token is only for
- * transport, not trust.
+ * Users who want to identify themselves can replace the demo session
+ * by calling `replaceSession(token, user, business)` — left here for
+ * future use (e.g. team collaboration features).
  */
 
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { api } from "../api/client.js";
 
-const AuthContext = createContext(null);
+const Ctx = createContext(null);
 const TOKEN_KEY = "busyness_token";
 const USER_KEY = "busyness_user";
 const BUSINESS_KEY = "busyness_business";
 
-export function AuthProvider({ children }) {
-  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
-  const [user, setUser] = useState(() => {
-    const stored = localStorage.getItem(USER_KEY);
-    return stored ? JSON.parse(stored) : null;
-  });
-  const [business, setBusiness] = useState(() => {
-    const stored = localStorage.getItem(BUSINESS_KEY);
-    return stored ? JSON.parse(stored) : null;
-  });
-  const [businesses, setBusinesses] = useState([]);
-  const [loading, setLoading] = useState(true);
+function readStored() {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const user = JSON.parse(localStorage.getItem(USER_KEY) || "null");
+    const business = JSON.parse(localStorage.getItem(BUSINESS_KEY) || "null");
+    return { token, user, business };
+  } catch {
+    return { token: null, user: null, business: null };
+  }
+}
 
-  // On mount: if token exists, verify and load businesses
-  useEffect(() => {
-    const init = async () => {
-      if (!token) {
-        setLoading(false);
-        return;
-      }
-      try {
-        const res = await api.get("/api/auth/me");
-        setBusinesses(res.businesses || []);
-        // Auto-select first business if none selected
-        if (!business && res.businesses?.length > 0) {
-          setBusiness(res.businesses[0]);
-          localStorage.setItem(BUSINESS_KEY, JSON.stringify(res.businesses[0]));
-        }
-      } catch {
-        // Token invalid/expired — clear everything
-        localStorage.removeItem(TOKEN_KEY);
-        localStorage.removeItem(USER_KEY);
-        localStorage.removeItem(BUSINESS_KEY);
-        setToken(null);
-        setUser(null);
-        setBusiness(null);
-        setBusinesses([]);
-      }
-      setLoading(false);
-    };
-    init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+function persist(token, user, business) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+  else localStorage.removeItem(USER_KEY);
+  if (business) localStorage.setItem(BUSINESS_KEY, JSON.stringify(business));
+  else localStorage.removeItem(BUSINESS_KEY);
+}
 
-  const login = useCallback(async (email, password) => {
-    const res = await api.post("/api/auth/login", { email, password });
-    api.setToken(res.token);
-    setToken(res.token);
-    setUser(res.user);
-    localStorage.setItem(TOKEN_KEY, res.token);
-    localStorage.setItem(USER_KEY, JSON.stringify(res.user));
+function randomSuffix() {
+  return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+}
 
-    // Load businesses — if this fails (e.g. rate limited), don't block login
-    try {
-      const me = await api.get("/api/auth/me");
-      setBusinesses(me.businesses || []);
-      if (me.businesses?.length > 0) {
-        setBusiness(me.businesses[0]);
-        localStorage.setItem(BUSINESS_KEY, JSON.stringify(me.businesses[0]));
-      }
-    } catch {
-      // /me failed but login itself succeeded — proceed without business context
-      // Dashboard will show "No business selected" and user can retry later
-    }
-    return res;
-  }, []);
-
-  const register = useCallback(async (email, password, name, businessName) => {
+async function bootstrapDemo() {
+  const email = `demo-${randomSuffix()}@busyness.app`;
+  const password = "Demo1234!";
+  const name = "Demo User";
+  const businessName = "Demo Workspace";
+  try {
     const res = await api.post("/api/auth/register", {
       email,
       password,
       name,
       business_name: businessName,
     });
-    api.setToken(res.token);
-    setToken(res.token);
-    setUser(res.user);
-    localStorage.setItem(USER_KEY, JSON.stringify(res.user));
-    setBusiness(res.business);
-    localStorage.setItem(BUSINESS_KEY, JSON.stringify(res.business));
-    setBusinesses([res.business]);
-    return res;
+    return {
+      token: res.token,
+      user: res.user,
+      business: res.business,
+    };
+  } catch (err) {
+    console.warn("Demo bootstrap failed; continuing without session.", err);
+    return null;
+  }
+}
+
+export function AuthProvider({ children }) {
+  const [{ token, user, business }, setState] = useState(readStored);
+  const [ready, setReady] = useState(false);
+
+  // Auto-bootstrap demo session on first visit
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (token) {
+        // Already have a session — keep it
+        setReady(true);
+        return;
+      }
+      const session = await bootstrapDemo();
+      if (cancelled) return;
+      if (session) {
+        api.setToken(session.token);
+        persist(session.token, session.user, session.business);
+        setState(session);
+      }
+      setReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const replaceSession = useCallback((nextToken, nextUser, nextBusiness) => {
+    api.setToken(nextToken);
+    persist(nextToken, nextUser, nextBusiness);
+    setState({ token: nextToken, user: nextUser, business: nextBusiness });
   }, []);
 
-  const logout = useCallback(() => {
+  const clearSession = useCallback(() => {
     api.clearToken();
-    localStorage.removeItem(USER_KEY);
-    localStorage.removeItem(BUSINESS_KEY);
-    setToken(null);
-    setUser(null);
-    setBusiness(null);
-    setBusinesses([]);
-  }, []);
-
-  const switchBusiness = useCallback((biz) => {
-    setBusiness(biz);
-    localStorage.setItem(BUSINESS_KEY, JSON.stringify(biz));
+    persist(null, null, null);
+    setState({ token: null, user: null, business: null });
   }, []);
 
   const value = {
     token,
     user,
     business,
-    businesses,
-    loading,
-    login,
-    register,
-    logout,
-    switchBusiness,
+    businesses: business ? [business] : [],
+    ready,
+    replaceSession,
+    clearSession,
     isAuthenticated: !!token,
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 export function useAuth() {
-  const ctx = useContext(AuthContext);
+  const ctx = useContext(Ctx);
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
 }

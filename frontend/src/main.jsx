@@ -3,14 +3,20 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App.jsx";
 import { AuthProvider } from "./context/AuthContext.jsx";
+import { ThemeProvider } from "./context/ThemeContext.jsx";
+import { WorkspaceProvider } from "./context/WorkspaceContext.jsx";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <ThemeProvider>
       <AuthProvider>
-        <App />
+        <WorkspaceProvider>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </WorkspaceProvider>
       </AuthProvider>
-    </BrowserRouter>
+    </ThemeProvider>
   </React.StrictMode>
 );

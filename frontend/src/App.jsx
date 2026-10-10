@@ -1,14 +1,22 @@
 /**
- * App — main router with public and protected routes.
- * Protected routes are wrapped in Layout (sidebar + topbar).
+ * App — router with no auth gate.
+ *
+ * Landing is the entry point. Pressing "Get Started" (or Enter) drops
+ * the user into the workspace (defaults to /inventory). The four
+ * module landing pages live under /:module, with sub-pages at
+ * /:module/... for the existing CRUD views.
  */
 
 import { Routes, Route, Navigate } from "react-router-dom";
-import Layout from "./components/Layout.jsx";
-import ProtectedRoute from "./components/ProtectedRoute.jsx";
-import Login from "./pages/Login.jsx";
-import Register from "./pages/Register.jsx";
-import Dashboard from "./pages/Dashboard.jsx";
+import Landing from "./pages/Landing.jsx";
+import AppLayout from "./components/AppLayout.jsx";
+import { useAuth } from "./context/AuthContext.jsx";
+import { Spinner } from "./components/ui/Spinner.jsx";
+import FinancialHub from "./pages/modules/FinancialHub.jsx";
+import InventoryHub from "./pages/modules/InventoryHub.jsx";
+import TasksHub from "./pages/modules/TasksHub.jsx";
+import MarketingHub from "./pages/modules/MarketingHub.jsx";
+
 import Customers from "./pages/financials/Customers.jsx";
 import Invoices from "./pages/financials/Invoices.jsx";
 import InvoiceDetail from "./pages/financials/InvoiceDetail.jsx";
@@ -20,33 +28,42 @@ import TeamMembers from "./pages/tasks/TeamMembers.jsx";
 import Projects from "./pages/marketing/Projects.jsx";
 import ProjectDetail from "./pages/marketing/ProjectDetail.jsx";
 
-function Protected({ children }) {
-  return (
-    <ProtectedRoute>
-      <Layout>{children}</Layout>
-    </ProtectedRoute>
-  );
+function Workspace({ children }) {
+  const { ready } = useAuth();
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+  return <AppLayout>{children}</AppLayout>;
 }
 
 export default function App() {
   return (
     <Routes>
-      {/* Public routes */}
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
+      {/* Landing */}
+      <Route path="/" element={<Landing />} />
 
-      {/* Protected routes */}
-      <Route path="/" element={<Protected><Dashboard /></Protected>} />
-      <Route path="/financials/customers" element={<Protected><Customers /></Protected>} />
-      <Route path="/financials/invoices" element={<Protected><Invoices /></Protected>} />
-      <Route path="/financials/invoices/:id" element={<Protected><InvoiceDetail /></Protected>} />
-      <Route path="/inventory/products" element={<Protected><Products /></Protected>} />
-      <Route path="/inventory/suppliers" element={<Protected><Suppliers /></Protected>} />
-      <Route path="/inventory/stock-movements" element={<Protected><StockMovements /></Protected>} />
-      <Route path="/tasks" element={<Protected><TaskList /></Protected>} />
-      <Route path="/tasks/team" element={<Protected><TeamMembers /></Protected>} />
-      <Route path="/marketing/projects" element={<Protected><Projects /></Protected>} />
-      <Route path="/marketing/projects/:id" element={<Protected><ProjectDetail /></Protected>} />
+      {/* Workspace */}
+      <Route path="/financial" element={<Workspace><FinancialHub /></Workspace>} />
+      <Route path="/financial/customers" element={<Workspace><Customers /></Workspace>} />
+      <Route path="/financial/invoices" element={<Workspace><Invoices /></Workspace>} />
+      <Route path="/financial/invoices/:id" element={<Workspace><InvoiceDetail /></Workspace>} />
+
+      <Route path="/inventory" element={<Workspace><InventoryHub /></Workspace>} />
+      <Route path="/inventory/products" element={<Workspace><Products /></Workspace>} />
+      <Route path="/inventory/suppliers" element={<Workspace><Suppliers /></Workspace>} />
+      <Route path="/inventory/movements" element={<Workspace><StockMovements /></Workspace>} />
+
+      <Route path="/tasks" element={<Workspace><TasksHub /></Workspace>} />
+      <Route path="/tasks/list" element={<Workspace><TaskList /></Workspace>} />
+      <Route path="/tasks/team" element={<Workspace><TeamMembers /></Workspace>} />
+
+      <Route path="/marketing" element={<Workspace><MarketingHub /></Workspace>} />
+      <Route path="/marketing/projects" element={<Workspace><Projects /></Workspace>} />
+      <Route path="/marketing/projects/:id" element={<Workspace><ProjectDetail /></Workspace>} />
 
       {/* Fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
