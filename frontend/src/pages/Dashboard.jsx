@@ -42,7 +42,10 @@ export default function Dashboard() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (!business?.id) return;
+    if (!business?.id) {
+      setLoading(false);
+      return;
+    }
     const base = `/api/businesses/${business.id}`;
     (async () => {
       setLoading(true);
@@ -71,12 +74,35 @@ export default function Dashboard() {
     })();
   }, [business?.id]);
 
-  if (loading) return <div className="py-16"><Spinner size="lg" /></div>;
+  if (loading) return <div className="py-16 flex justify-center"><Spinner size="lg" /></div>;
   if (error) return <div className="card"><p className="text-red-600">{error}</p></div>;
+  if (!business?.id) {
+    return (
+      <div className="card text-center py-12">
+        <p className="text-gray-500">No business selected. Please contact an administrator or create a business.</p>
+      </div>
+    );
+  }
 
   const inv = data?.inventory;
   const tasks = data?.tasks;
   const mktg = data?.marketing;
+
+  // Build task status counts from flat API response
+  const taskStatuses = tasks
+    ? [
+        { status: "pending", count: tasks.pending_tasks ?? 0 },
+        { status: "in_progress", count: tasks.in_progress_tasks ?? 0 },
+        { status: "completed", count: tasks.completed_tasks ?? 0 },
+        { status: "cancelled", count: tasks.cancelled_tasks ?? 0 },
+      ]
+    : [];
+
+  const openTasks = tasks
+    ? (tasks.pending_tasks ?? 0) + (tasks.in_progress_tasks ?? 0)
+    : "—";
+
+  const totalProjects = mktg?.total_projects ?? "—";
 
   return (
     <div className="space-y-6">
@@ -84,8 +110,8 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard icon={DollarSign} label="Total Invoices" value={data?.recentInvoices?.length || 0} to="/financials/invoices" color="brand" />
         <StatCard icon={Package} label="Products" value={inv?.total_products ?? "—"} to="/inventory/products" color="blue" />
-        <StatCard icon={CheckSquare} label="Open Tasks" value={tasks ? (tasks.counts?.pending || 0) + (tasks.counts?.in_progress || 0) : "—"} to="/tasks" color="yellow" />
-        <StatCard icon={Megaphone} label="Marketing Projects" value={mktg?.project_counts ? Object.values(mktg.project_counts).reduce((a, b) => a + b, 0) : "—"} to="/marketing/projects" color="green" />
+        <StatCard icon={CheckSquare} label="Open Tasks" value={openTasks} to="/tasks" color="yellow" />
+        <StatCard icon={Megaphone} label="Marketing Projects" value={totalProjects} to="/marketing/projects" color="green" />
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
@@ -109,9 +135,9 @@ export default function Dashboard() {
         {/* Task overview */}
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Task Overview</h2>
-          {tasks?.counts ? (
+          {taskStatuses.length > 0 ? (
             <div className="grid grid-cols-2 gap-3">
-              {Object.entries(tasks.counts).map(([status, count]) => (
+              {taskStatuses.map(({ status, count }) => (
                 <div key={status} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
                   <Badge status={status} />
                   <span className="text-lg font-bold">{count}</span>

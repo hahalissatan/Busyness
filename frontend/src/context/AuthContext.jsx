@@ -67,14 +67,20 @@ export function AuthProvider({ children }) {
     api.setToken(res.token);
     setToken(res.token);
     setUser(res.user);
+    localStorage.setItem(TOKEN_KEY, res.token);
     localStorage.setItem(USER_KEY, JSON.stringify(res.user));
 
-    // Load businesses
-    const me = await api.get("/api/auth/me");
-    setBusinesses(me.businesses || []);
-    if (me.businesses?.length > 0) {
-      setBusiness(me.businesses[0]);
-      localStorage.setItem(BUSINESS_KEY, JSON.stringify(me.businesses[0]));
+    // Load businesses — if this fails (e.g. rate limited), don't block login
+    try {
+      const me = await api.get("/api/auth/me");
+      setBusinesses(me.businesses || []);
+      if (me.businesses?.length > 0) {
+        setBusiness(me.businesses[0]);
+        localStorage.setItem(BUSINESS_KEY, JSON.stringify(me.businesses[0]));
+      }
+    } catch {
+      // /me failed but login itself succeeded — proceed without business context
+      // Dashboard will show "No business selected" and user can retry later
     }
     return res;
   }, []);
