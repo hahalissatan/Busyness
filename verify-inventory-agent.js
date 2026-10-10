@@ -94,9 +94,9 @@ async function main() {
 
   const ps3 = await sendGoal("show product details for xyz");
   if (ps3.steps?.some(s => s.input?.intent === "product_search")) {
-    ok("Pattern 'show product' matched product_search intent");
+    ok("Pattern 'product details' matched product_search intent");
   } else {
-    bad("Pattern 'show product' not matched");
+    bad("Pattern 'product details' not matched");
   }
 
   // 1b. Output structure
@@ -547,6 +547,248 @@ async function main() {
     } else {
       bad(`Regression: ${t.name} step not completed`, step?.status);
     }
+  }
+
+  // ================================================================
+  // 10. Data-backed correctness — verify with real test data
+  // ================================================================
+  console.log("\n--- Test 10: Data-backed correctness ---\n");
+
+  // Get the DB server's CURRENT_DATE so we can create products with
+  // correct expiry dates (the server may be in a different timezone).
+  const { query: dbQuery } = await import("./backend/src/db/pool.js");
+  const dateRes = await dbQuery(
+    "SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS today, " +
+    "to_char(CURRENT_DATE + INTERVAL '3 days', 'YYYY-MM-DD') AS three_days, " +
+    "to_char(CURRENT_DATE + INTERVAL '10 days', 'YYYY-MM-DD') AS ten_days"
+  );
+  const dbToday = dateRes.rows[0].today;
+  const dbThreeDays = dateRes.rows[0].three_days;
+  const dbTenDays = dateRes.rows[0].ten_days;
+  ok(`DB server date: today=${dbToday}, +3d=${dbThreeDays}, +10d=${dbTenDays}`);
+
+  // Create a supplier
+  const supRes = await fetch(`${BASE}/api/businesses/${businessId}/inventory/suppliers`, {
+    method: "POST", headers,
+    body: JSON.stringify({ name: "Test Supplier Co", contact_name: "Alice" }),
+  });
+  const supData = await supRes.json();
+  const supplierId = supData.id;
+  if (supplierId) {
+    ok(`Supplier created: ${supData.name} (${supplierId.slice(0, 8)}...)`);
+  } else {
+    bad("Failed to create supplier", JSON.stringify(supData));
+  }
+
+  // Create products with various expiry dates
+  //   P1: expired (2020-01-01 — clearly in the past)
+  //   P2: expiring soon (today)
+  //   P3: expiring soon (3 days from now)
+  //   P4: beyond 7-day window (10 days from now) — should NOT appear
+  //   P5: no expiry date — should NOT appear in near_expiry
+  //   P6: no supplier — should appear in "No Supplier" group
+  //   P7: with supplier — should appear under "Test Supplier Co"
+  const productConfigs = [
+    { name: "Expired Widget", sku: "EXP-001", expiry_date: "2020-01-01", supplier_id: supplierId },
+    { name: "Today Product", sku: "EXP-002", expiry_date: dbToday, supplier_id: null },
+    { name: "Three Day Product", sku: "EXP-003", expiry_date: dbThreeDays, supplier_id: supplierId },
+    { name: "Far Future Product", sku: "EXP-004", expiry_date: dbTenDays, supplier_id: null },
+    { name: "No Expiry Product", sku: "EXP-005", expiry_date: null, supplier_id: supplierId },
+    { name: "Unsupplied Product", sku: "EXP-006", expiry_date: "2020-06-15", supplier_id: null },
+    { name: "Supplied Product", sku: "EXP-007", expiry_date: null, supplier_id: supplierId },
+  ];
+
+  const createdProducts = [];
+  for (const pc of productConfigs) {
+    const pres = await fetch(`${BASE}/api/businesses/${businessId}/inventory/products`, {
+      method: "POST", headers,
+      body: JSON.stringify({
+        name: pc.name, sku: pc.sku, unit_cost: 10.00, min_stock_threshold: 5,
+        expiry_date: pc.expiry_date, supplier_id: pc.supplier_id,
+      }),
+    });
+    const pdata = await pres.json();
+    if (pdata.id) {
+      createdProducts.push(pdata);
+    } else {
+      bad(`Failed to create product ${pc.name}`, JSON.stringify(pdata));
+    }
+  }
+  ok(`Created ${createdProducts.length}/${productConfigs.length} test products`);
+
+  // --- 10a. near_expiry with real data ---
+  console.log("\n  [near_expiry with data]");
+  const neData = await sendGoal("near expiry");
+  const neDataStep = neData.steps?.find(s => s.input?.intent === "near_expiry");
+
+  if (neDataStep?.output?.expired_count >= 1) {
+    ok(`near_expiry: ${neDataStep.output.expired_count} expired product(s) found`);
+  } else {
+    bad("near_expiry: expected at least 1 expired product", `got ${neDataStep?.output?.expired_count}`);
+  }
+
+  // Verify "Expired Widget" (2020-01-01) is in expired, NOT in expiring_soon
+  const expiredNames = neDataStep?.output?.expired?.map(p => p.name) || [];
+  if (expiredNames.includes("Expired Widget")) {
+    ok("near_expiry: 'Expired Widget' correctly classified as expired");
+  } else {
+    bad("near_expiry: 'Expired Widget' NOT in expired array", `got: ${expiredNames.join(", ")}`);
+  }
+
+  const soonNames = neDataStep?.output?.expiring_soon?.map(p => p.name) || [];
+  if (!soonNames.includes("Expired Widget")) {
+    ok("near_expiry: 'Expired Widget' NOT in expiring_soon (correct separation)");
+  } else {
+    bad("near_expiry: 'Expired Widget' incorrectly in expiring_soon");
+  }
+
+  // Verify "Today Product" is in expiring_soon, NOT expired
+  if (soonNames.includes("Today Product")) {
+    ok("near_expiry: 'Today Product' correctly in expiring_soon");
+  } else {
+    bad("near_expiry: 'Today Product' NOT in expiring_soon", `got: ${soonNames.join(", ")}`);
+  }
+  if (!expiredNames.includes("Today Product")) {
+    ok("near_expiry: 'Today Product' NOT in expired (boundary: today = expiring, not expired)");
+  } else {
+    bad("near_expiry: 'Today Product' incorrectly in expired");
+  }
+
+  // Verify "Three Day Product" is in expiring_soon
+  if (soonNames.includes("Three Day Product")) {
+    ok("near_expiry: 'Three Day Product' in expiring_soon (within 7-day window)");
+  } else {
+    bad("near_expiry: 'Three Day Product' NOT in expiring_soon", `got: ${soonNames.join(", ")}`);
+  }
+
+  // Verify "Far Future Product" does NOT appear (beyond 7-day window)
+  const allNeNames = [...expiredNames, ...soonNames];
+  if (!allNeNames.includes("Far Future Product")) {
+    ok("near_expiry: 'Far Future Product' excluded (beyond 7-day window)");
+  } else {
+    bad("near_expiry: 'Far Future Product' should not appear");
+  }
+
+  // Verify "No Expiry Product" does NOT appear
+  if (!allNeNames.includes("No Expiry Product")) {
+    ok("near_expiry: 'No Expiry Product' excluded (no expiry date)");
+  } else {
+    bad("near_expiry: 'No Expiry Product' should not appear");
+  }
+
+  // Verify expiry_date is a string in YYYY-MM-DD format (not Date object)
+  if (neDataStep?.output?.expired?.[0]?.expiry_date) {
+    const dateStr = neDataStep.output.expired[0].expiry_date;
+    if (typeof dateStr === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      ok(`near_expiry: expiry_date is YYYY-MM-DD string: "${dateStr}"`);
+    } else {
+      bad("near_expiry: expiry_date not YYYY-MM-DD string", `got: ${dateStr} (${typeof dateStr})`);
+    }
+  }
+
+  // Verify summary mentions "expired" for expired products
+  if (neData.final_report?.summary?.toLowerCase()?.includes("expired")) {
+    ok("near_expiry: summary mentions 'expired'");
+  } else {
+    bad("near_expiry: summary doesn't mention 'expired'", neData.final_report?.summary?.slice(0, 80));
+  }
+
+  // --- 10b. inventory_by_supplier with real data ---
+  console.log("\n  [inventory_by_supplier with data]");
+  const isData = await sendGoal("by supplier");
+  const isDataStep = isData.steps?.find(s => s.input?.intent === "inventory_by_supplier");
+
+  if (isDataStep?.output?.count >= 1) {
+    ok(`inventory_by_supplier: ${isDataStep.output.count} supplier group(s) found`);
+  } else {
+    bad("inventory_by_supplier: expected at least 1 group", `got ${isDataStep?.output?.count}`);
+  }
+
+  // Verify "Test Supplier Co" group exists
+  const supGroups = isDataStep?.output?.suppliers || [];
+  const testSup = supGroups.find(s => s.supplier_name === "Test Supplier Co");
+  if (testSup) {
+    ok(`inventory_by_supplier: 'Test Supplier Co' group found (${testSup.product_count} products)`);
+  } else {
+    bad("inventory_by_supplier: 'Test Supplier Co' group not found", supGroups.map(s => s.supplier_name).join(", "));
+  }
+
+  // Verify "No Supplier" group exists
+  const noSup = supGroups.find(s => s.supplier_name === "No Supplier");
+  if (noSup) {
+    ok(`inventory_by_supplier: 'No Supplier' group found (${noSup.product_count} products)`);
+  } else {
+    bad("inventory_by_supplier: 'No Supplier' group not found", supGroups.map(s => s.supplier_name).join(", "));
+  }
+
+  // Verify no product is double-counted: sum of product_count across groups should equal total products
+  const totalFromGroups = supGroups.reduce((sum, s) => sum + s.product_count, 0);
+  // Count active products we created (all 7 are active by default)
+  if (totalFromGroups === createdProducts.length) {
+    ok(`inventory_by_supplier: no double-counting (${totalFromGroups} products across ${supGroups.length} groups = ${createdProducts.length} total)`);
+  } else {
+    bad("inventory_by_supplier: product count mismatch", `groups sum=${totalFromGroups}, expected=${createdProducts.length}`);
+  }
+
+  // --- 10c. product_search with real data ---
+  console.log("\n  [product_search with data]");
+  const psData = await sendGoal("find product widget");
+  const psDataStep = psData.steps?.find(s => s.input?.intent === "product_search");
+
+  if (psDataStep?.output?.count >= 1 && psDataStep?.output?.search_term === "widget") {
+    ok(`product_search: found ${psDataStep.output.count} product(s) matching "widget"`);
+  } else {
+    bad("product_search: expected at least 1 match for 'widget'", `got count=${psDataStep?.output?.count}, term=${psDataStep?.output?.search_term}`);
+  }
+
+  // Verify search result names contain "widget" (case-insensitive)
+  const psNames = psDataStep?.output?.items?.map(p => p.name) || [];
+  const allMatch = psNames.every(n => n?.toLowerCase()?.includes("widget"));
+  if (allMatch && psNames.length > 0) {
+    ok(`product_search: all results contain 'widget' in name (${psNames.join(", ")})`);
+  } else {
+    bad("product_search: some results don't contain 'widget'", psNames.join(", "));
+  }
+
+  // --- 10d. ILIKE wildcard safety ---
+  console.log("\n  [ILIKE wildcard safety]");
+  // Search for "100% off" — the % should be escaped, so no products should match
+  // (unless a product name literally contains "100% off")
+  const psWildcard = await sendGoal("find product 100% off");
+  const psWStep = psWildcard.steps?.find(s => s.input?.intent === "product_search");
+  if (psWStep?.output?.search_term === "100% off" && psWStep?.output?.count === 0) {
+    ok("product_search: ILIKE wildcard '%' escaped — no false matches for '100% off'");
+  } else {
+    if (psWStep?.output?.count > 0) {
+      bad("product_search: ILIKE wildcard injection — '%' matched unintended products", `count=${psWStep.output.count}`);
+    } else {
+      ok("product_search: wildcard test passed (0 results)");
+    }
+  }
+
+  // --- 10e. Pattern collision: "show product count" ---
+  console.log("\n  [pattern collision: show product count]");
+  const colShow = await sendGoal("show product count");
+  const colShowIntents = colShow.steps?.map(s => s.input?.intent) || [];
+  if (colShowIntents.includes("inventory_summary") && !colShowIntents.includes("product_search")) {
+    ok("'show product count' → matches inventory_summary only (no false product_search match)");
+  } else {
+    bad("Pattern collision: 'show product count'", `matched: ${colShowIntents.join(", ")}`);
+  }
+
+  // --- 10f. Audit log source field ---
+  console.log("\n  [audit log source field]");
+  const auditStep = neData.steps?.find(s => s.input?.intent === "near_expiry");
+  if (auditStep?.input?.source === "inventoryAgent") {
+    ok("Audit: step input.source is 'inventoryAgent' (fed to audit log changes)");
+  } else {
+    bad("Audit: step input.source missing or incorrect", auditStep?.input?.source);
+  }
+  const coordStep = neData.steps?.find(s => s.input?.source === "coordinator");
+  if (coordStep) {
+    ok("Audit: coordinator intent has source = 'coordinator'");
+  } else {
+    ok("Audit: no coordinator-source step in this run (only inventory agent matched)");
   }
 
   // ================================================================

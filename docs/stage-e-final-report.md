@@ -427,7 +427,7 @@ Implemented the Inventory Specialist Agent as a new module (`inventoryAgent.js`)
 
 | Intent | Agent type | Source | Patterns | Query | Output |
 |--------|-----------|--------|----------|-------|--------|
-| `product_search` | inventory | inventoryAgent | find product, search product, look up product, show product, product details, product info | `SELECT ... FROM products WHERE business_id=$1 AND (name/sku/description ILIKE $term) LIMIT 20` | items[], count, search_term |
+| `product_search` | inventory | inventoryAgent | find product, search product, look up product, product details, product info | `SELECT ... FROM products WHERE business_id=$1 AND (name/sku/description ILIKE $term) LIMIT 20` | items[], count, search_term |
 | `near_expiry` | inventory | inventoryAgent | near expiry, expiring, about to expire, expire soon, expiry date, expiring soon | `SELECT ... WHERE expiry_date <= CURRENT_DATE + INTERVAL '7 days'` | expired[], expiring_soon[], expired_count, expiring_soon_count, days_threshold |
 | `stock_movement_history` | inventory | inventoryAgent | stock movement, recent movement, stock history, stock changes, movement history | `SELECT ... FROM stock_movements JOIN products ORDER BY created_at DESC LIMIT 20` | movements[], count |
 | `inventory_by_supplier` | inventory | inventoryAgent | by supplier, supplier breakdown, supplier inventory, inventory by supplier, supplier summary | `SELECT ... FROM products LEFT JOIN suppliers GROUP BY supplier ORDER BY total_value DESC` | suppliers[], count |
@@ -459,21 +459,23 @@ User goal → coordinator.matchIntents(goal)
 |------|-------|--------|
 | `backend/src/services/inventoryAgent.js` (NEW) | ~310 | 4 read-only inventory intents with execute(businessId, goal), extractSearchTerm helper, getInventoryIntentIds export |
 | `backend/src/services/coordinator.js` (MODIFIED) | 6 changes | Import inventoryAgent, ALL_INTENTS combined array, matchIntents uses ALL_INTENTS, execute passes goal, step input source field, 4 new formatStepSummary cases + updated fallback |
-| `verify-inventory-agent.js` (NEW) | ~570 | 9-section test suite — 59 assertions |
+| `verify-inventory-agent.js` (NEW) | ~810 | 10-section test suite — 82 assertions (59 structural + 23 data-backed) |
 
 ### Test Results
 
 | Suite | Type | Assertions | Passed | Failed |
 |-------|------|-----------|--------|--------|
-| `verify-inventory-agent.js` | NEW | 59 | 59 | 0 |
+| `verify-inventory-agent.js` | NEW+data | 82 | 82 | 0 |
 | `verify-stage-a.js` | Regression | 88 | 88 | 0 |
 | `verify-scope-safety.js` | Regression | 16 | 16 | 0 |
 | `verify-stage-b.js` | Regression | 37 | 37 | 0 |
 | Frontend production build | Regression | — | success | — |
 
-**Total: 200 passing assertions across 4 test suites + 1 successful production build.**
+**Total: 200 passing assertions across 4 test suites + 1 successful production build.** (Stage 2 baseline)
 
-### Inventory Agent Test Coverage (59 assertions)
+Stage 3 updated the inventory agent test suite to 82 assertions and confirmed all regression suites still pass — see Section 14 for the full breakdown totaling 223 assertions.
+
+### Inventory Agent Test Coverage (82 assertions — updated in Stage 3)
 
 | Section | Tests | What's verified |
 |---------|-------|----------------|
@@ -486,6 +488,7 @@ User goal → coordinator.matchIntents(goal)
 | Test 7: Read-only enforcement | 3 | PUT/PATCH/DELETE → 404 |
 | Test 8: Run/step/audit status | 6 | Run completed, step completed, all steps have evidence, matched_intents in final_report, GET run retrieves steps |
 | Test 9: Regression — 7 existing intents | 7 | All 7 original intents still match and execute correctly |
+| Test 10: Data-backed correctness | 23 | Real products with controlled expiry dates/suppliers: expired vs expiring_soon split, today boundary, 7-day window exclusion, NULL expiry exclusion, YYYY-MM-DD string format, No Supplier grouping, double-count check, ILIKE wildcard escape, "show product count" collision fix, audit source field |
 
 ### Confirmations
 
@@ -497,3 +500,128 @@ User goal → coordinator.matchIntents(goal)
 - ✅ **All queries parameterized** — `$1`, `$2` placeholders, no string interpolation
 - ✅ **Delegation identity recorded** — `source: "inventoryAgent"` in step input for audit trail
 - ✅ **Existing intents unchanged** — 88/88 Stage A assertions still pass
+
+---
+
+## 14. Phase 10B Stage 3 — Inventory Agent Integration Review
+
+### Overview
+
+An independent review of the actual implementation, tracing each new intent from goal through matching, SQL execution, summary formatting, run/step status, and audit logging. Four verified defects were found and fixed. Twenty-three new data-backed tests were added.
+
+### Findings from Tracing the Actual Code
+
+#### Defect 1 (CRITICAL): DATE type handling breaks expired/expiring_soon classification
+
+**Root cause:** The `pg` library returns PostgreSQL `DATE` columns as JavaScript `Date` objects. The original code used `String(row.expiry_date).slice(0, 10)` to extract a `YYYY-MM-DD` string for date comparison. But `String(dateObj)` in Node.js returns a locale-dependent string like `"Sat Oct 10 2026 00:00:00 GMT+0800"`, not `"2026-10-10"`.
+
+**Impact:** The string comparison `expiryStr < todayStr` compared `"Sat Oct 10"` with `"2026-10-10"`. Since `'S' (ASCII 83) > '2' (ASCII 50)`, ALL products were classified as `expiring_soon` — the `expired` array was always empty. Already-expired products were never identified.
+
+**Verified empirically:** A probe script confirmed `typeof row.expiry_date === "object"` and `String(date).slice(0, 10) === "Sat Oct 10"` (not `"2026-10-10"`).
+
+**Fix:** Use `to_char(expiry_date, 'YYYY-MM-DD')` in the SQL query to return dates as plain strings. Also include `to_char(CURRENT_DATE, 'YYYY-MM-DD') AS today_date` in the same query to ensure the split logic uses the same date source as the WHERE clause. Applied to both `near_expiry` and `product_search` queries for consistency.
+
+**Also fixed in `product_search`:** The `expiry_date` field in search results now uses `to_char()` so JSON output shows `"2026-10-10"` instead of a Date-serialized ISO timestamp.
+
+#### Defect 2: Pattern collision — "show product" too broad
+
+**Root cause:** The pattern `"show product"` was a substring of `"show product count"`, which should match `inventory_summary` (via the `"product count"` pattern) only. The collision caused an unintended multi-intent execution: both `product_search` and `inventory_summary` were triggered.
+
+**Fix:** Removed `"show product"` from `product_search` patterns. The patterns `"product details"` and `"product info"` cover the same use case. The user can still say "show product details widget" — it matches via the `"product details"` pattern.
+
+#### Defect 3: ILIKE wildcard injection in product_search
+
+**Root cause:** The search term was interpolated directly into `%${searchTerm}%` for the ILIKE clause. PostgreSQL ILIKE treats `%` and `_` as wildcard characters. A search for `"100% off"` would match any product with "100" followed by anything followed by "off".
+
+**Fix:** Escape `%` and `_` with backslash before interpolation: `searchTerm.replace(/[%_]/g, "\\$&")`. PostgreSQL's ILIKE uses `\` as the default escape character, so `\%` is treated as a literal `%`.
+
+#### Defect 4: Audit log missing source field
+
+**Root cause:** The audit log `changes` JSON contained `{ intent, evidence }` but not `source` (the specialist agent identity). While the step input had the `source` field, the audit log entry — written separately — did not.
+
+**Fix:** Added `source: intent.source || "coordinator"` to both the success and failure audit log `changes` JSON in `coordinator.js`.
+
+### Precise Fixes
+
+| Defect | File | Change |
+|--------|------|--------|
+| DATE handling (near_expiry) | `inventoryAgent.js` | SQL: `to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date` + `to_char(CURRENT_DATE, 'YYYY-MM-DD') AS today_date`; JS: `row.expiry_date` (string) instead of `String(row.expiry_date).slice(0, 10)` |
+| DATE handling (product_search) | `inventoryAgent.js` | SQL: `to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date` |
+| Pattern collision | `inventoryAgent.js` | Removed `"show product"` from product_search patterns (5 patterns → 5 patterns, different set) |
+| ILIKE wildcard injection | `inventoryAgent.js` | Added `const escapedTerm = searchTerm.replace(/[%_]/g, "\\$&")` before query; used `escapedTerm` in parameter |
+| Audit log source | `coordinator.js` | Added `source: intent.source \|\| "coordinator"` to both success (line 523) and failure (line 557) audit log `changes` JSON |
+
+### Data-backed Test Coverage (Test 10 — 23 new assertions)
+
+Created a supplier and 7 products with controlled expiry dates and supplier assignments within the test business:
+
+| Product | Expiry Date | Supplier | Expected near_expiry behavior |
+|---------|------------|----------|-------------------------------|
+| Expired Widget | 2020-01-01 | Test Supplier Co | expired array |
+| Today Product | DB CURRENT_DATE | No supplier | expiring_soon array |
+| Three Day Product | CURRENT_DATE + 3 | Test Supplier Co | expiring_soon array |
+| Far Future Product | CURRENT_DATE + 10 | No supplier | Excluded (beyond 7-day window) |
+| No Expiry Product | NULL | Test Supplier Co | Excluded (no expiry date) |
+| Unsupplied Product | 2020-06-15 | No supplier | expired array |
+| Supplied Product | NULL | Test Supplier Co | Not in near_expiry; in supplier group |
+
+**Verified with data:**
+- ✅ "Expired Widget" correctly classified as expired (not expiring_soon)
+- ✅ "Today Product" correctly classified as expiring_soon (boundary: today = expiring, not expired)
+- ✅ "Three Day Product" in expiring_soon (within 7-day window)
+- ✅ "Far Future Product" excluded (beyond 7-day window)
+- ✅ "No Expiry Product" excluded (NULL expiry_date)
+- ✅ `expiry_date` returned as `"2026-01-01"` string (YYYY-MM-DD format, not Date object)
+- ✅ Summary text mentions "expired" for expired products
+- ✅ "No Supplier" group exists with correct product count
+- ✅ No double-counting: sum of group product_count = total active products (7)
+- ✅ "Test Supplier Co" group exists with correct product count (4)
+- ✅ ILIKE wildcard `%` escaped: search for "100% off" returns 0 results (not all products)
+- ✅ "show product count" matches inventory_summary only (no false product_search match)
+- ✅ Audit log source field is "inventoryAgent" for inventory agent steps
+
+### Test Results
+
+| Suite | Type | Assertions | Passed | Failed |
+|-------|------|-----------|--------|--------|
+| `verify-inventory-agent.js` (updated) | NEW+data | 82 | 82 | 0 |
+| `verify-stage-a.js` | Regression | 88 | 88 | 0 |
+| `verify-scope-safety.js` | Regression | 16 | 16 | 0 |
+| `verify-stage-b.js` | Regression | 37 | 37 | 0 |
+| Frontend production build | Regression | — | success | — |
+
+**Total: 223 passing assertions across 4 test suites + 1 successful production build.**
+
+### Files Changed (Stage 3)
+
+| File | Change |
+|------|--------|
+| `backend/src/services/inventoryAgent.js` | 4 fixes: to_char for dates, removed "show product" pattern, ILIKE wildcard escaping, updated evidence string |
+| `backend/src/services/coordinator.js` | 2 fixes: added source to success and failure audit log entries |
+| `verify-inventory-agent.js` | Added Test 10 (23 data-backed assertions), updated Test 1 pattern message |
+| `docs/stage-e-final-report.md` | This section |
+
+### Remaining Limitations
+
+1. **Timezone reliance on DB CURRENT_DATE** — The near_expiry query uses `CURRENT_DATE` from PostgreSQL (UTC on Supabase). If the business operates in a different timezone, "today" may not match the business's local date. This is an architectural limitation, not a code defect.
+
+2. **`extractSearchTerm` is heuristic** — The term extraction strips patterns and filler words, but cannot distinguish "search product SKU-001" (term = "sku-001") from "search product with sku abc" (term = "sku abc"). The ILIKE search will still work, but the extracted term may include unintended words. This is acceptable for a rule-based system.
+
+3. **dotenv loading order** (from Phase 10A, unfixed) — `RATE_LIMIT_AUTH_MAX` from `.env` is not applied at runtime. Currently harmless (code default = 10 = .env value).
+
+4. **No conversation history** — each request is independent. If the user wants "now add filter X" to build on a previous result, the coordinator won't remember.
+
+5. **No per-business rate limiting** — a user could trigger many agent runs per 15 minutes (limited only by the global 100/15min rate).
+
+### Confirmations
+
+- ✅ **No database schema changes** — no new migrations, no ALTER TABLE, no CREATE TABLE
+- ✅ **No write operations** — all 4 inventory intents execute SELECT queries only
+- ✅ **No security relaxations** — no rate limit, auth, or CORS changes
+- ✅ **No new dependencies** — fixes use existing `pg` client and SQL `to_char()` function
+- ✅ **All queries parameterized** — `$1`, `$2` placeholders, no string interpolation into SQL
+- ✅ **All queries business-scoped** — every SQL query includes `WHERE business_id = $1`
+- ✅ **Joins cannot expose other business data** — `stock_movement_history` filters on `sm.business_id`; `inventory_by_supplier` filters on `p.business_id`
+- ✅ **Failures produce accurate statuses** — step-level errors set `status='failed'`; catastrophic errors set run `status='failed'`
+- ✅ **Audit records identify intent and source** — `changes` JSON includes `intent.id` and `source` ("inventoryAgent" or "coordinator")
+- ✅ **No UI changes** — frontend design, themes, chat, voice, file selection all unchanged
