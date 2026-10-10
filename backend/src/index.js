@@ -1,4 +1,5 @@
 import express from "express";
+import { closePool } from "./db/pool.js";
 
 const app = express();
 
@@ -46,9 +47,20 @@ const server = app.listen(PORT, () => {
 
 function shutdown(signal) {
   console.log(`\n${signal} received — shutting down gracefully...`);
-  server.close((err) => {
+  server.close(async (err) => {
     if (err) {
-      console.error("Error during shutdown:", err);
+      console.error("Error during server shutdown:", err);
+    }
+
+    // Close database pool
+    try {
+      await closePool();
+      console.log("Database pool closed.");
+    } catch (poolErr) {
+      console.error("Error closing database pool:", poolErr.message);
+    }
+
+    if (err) {
       process.exit(1);
     }
     console.log("Server closed. Goodbye.");
