@@ -13,5 +13,8 @@
     "db:health": "npm --prefix backend run db:health",
     "test": "npm --prefix backend run test",
     "test:watch": "npm --prefix backend run test:watch"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
   }
 }
