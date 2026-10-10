@@ -274,7 +274,7 @@ describe("Product CRUD", () => {
     expect(res.status).toBe(201);
     expect(res.body.id).toBeTruthy();
     expect(res.body.name).toBe("Test Product Widget");
-    expect(res.body.stock_quantity).toBe("0"); // starts at 0
+    expect(res.body.stock_quantity).toBe("0.00"); // NUMERIC(10,2) returns "0.00"
     expect(parseFloat(res.body.min_stock_threshold)).toBe(10);
     expect(parseFloat(res.body.unit_cost)).toBe(5.5);
     expect(res.body.supplier_id).toBe(supplierId);
@@ -287,7 +287,7 @@ describe("Product CRUD", () => {
     const res = await createProduct("Test Product Gadget", nextSku());
 
     expect(res.status).toBe(201);
-    expect(res.body.stock_quantity).toBe("0");
+    expect(res.body.stock_quantity).toBe("0.00");
     expect(parseFloat(res.body.min_stock_threshold)).toBe(0);
     expect(parseFloat(res.body.unit_cost)).toBe(0);
     expect(res.body.supplier_id).toBeNull();

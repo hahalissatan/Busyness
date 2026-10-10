@@ -175,7 +175,7 @@ router.post(
 
     const result = await query(
       `INSERT INTO suppliers (business_id, name, contact_name, email, phone, address)
-       VALUES ($1, $2, $3, $4, $5)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, business_id, name, contact_name, email, phone, address,
          created_at, updated_at`,
       [businessId, name, contact_name ?? null, email ?? null, phone ?? null, address ?? null]
@@ -378,20 +378,21 @@ router.get(
     const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const activeFilter = req.query.active;
 
-    // Build WHERE clauses dynamically
-    const conditions = ["business_id = $1"];
+    // Build WHERE clauses dynamically — must use p. prefix because of
+    // the LEFT JOIN with suppliers (both tables have business_id, name, etc.)
+    const conditions = ["p.business_id = $1"];
     const params = [businessId];
     let paramIdx = 2;
 
     if (search) {
       const pattern = `%${search}%`;
-      conditions.push(`(name ILIKE $${paramIdx} OR sku ILIKE $${paramIdx} OR description ILIKE $${paramIdx})`);
+      conditions.push(`(p.name ILIKE $${paramIdx} OR p.sku ILIKE $${paramIdx} OR p.description ILIKE $${paramIdx})`);
       params.push(pattern);
       paramIdx++;
     }
 
     if (activeFilter === "true" || activeFilter === "false") {
-      conditions.push(`is_active = $${paramIdx}`);
+      conditions.push(`p.is_active = $${paramIdx}`);
       params.push(activeFilter === "true");
       paramIdx++;
     }
@@ -399,7 +400,7 @@ router.get(
     const whereClause = conditions.join(" AND ");
 
     const countResult = await query(
-      `SELECT COUNT(*)::int AS total FROM products WHERE ${whereClause}`,
+      `SELECT COUNT(*)::int AS total FROM products p WHERE ${whereClause}`,
       params
     );
 

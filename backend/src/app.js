@@ -25,6 +25,8 @@ import authRoutes from "./routes/auth.js";
 import businessRoutes from "./routes/business.js";
 import financialsRoutes from "./routes/financials.js";
 import inventoryRoutes from "./routes/inventory.js";
+import taskRoutes from "./routes/tasks.js";
+import marketingRoutes from "./routes/marketing.js";
 
 export function createApp() {
   const app = express();
@@ -95,6 +97,20 @@ export function createApp() {
   // Endpoints:
   //   /products, /suppliers, /stock-movements, /overview, /low-stock
   app.use("/api/businesses/:businessId/inventory", inventoryRoutes);
+
+  // --- Task Allocation routes (auth + business membership required) ---
+  // The tasks router applies authenticateToken + requireBusinessAccess
+  // at the router level, so every endpoint is automatically protected.
+  // Endpoints:
+  //   /team-members, /tasks, /tasks/:id/assignments, /overview
+  app.use("/api/businesses/:businessId/tasks", taskRoutes);
+
+  // --- Marketing & Pitch Deck routes (auth + business membership required) ---
+  // The marketing router applies authenticateToken + requireBusinessAccess
+  // at the router level, so every endpoint is automatically protected.
+  // Endpoints:
+  //   /projects, /personas, /drafts, /pitch-decks, /overview
+  app.use("/api/businesses/:businessId/marketing", marketingRoutes);
 
   // --- 404 handler ---
   app.use((req, res) => {

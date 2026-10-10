@@ -194,6 +194,7 @@ GROUP BY i.id;
 | created_at      | TIMESTAMPTZ   | NOT NULL DEFAULT now()                                        |
 | updated_at      | TIMESTAMPTZ   | NOT NULL DEFAULT now()                                        |
 
+
 **Line total formula (backend service):**  
 `line_total = (quantity * unit_price) + (quantity * unit_price * tax_rate / 100) - discount_amount`
 
@@ -264,7 +265,6 @@ GROUP BY i.id;
 | is_active           | BOOLEAN       | NOT NULL DEFAULT TRUE                                  |
 | created_at          | TIMESTAMPTZ   | NOT NULL DEFAULT now()                                 |
 | updated_at          | TIMESTAMPTZ   | NOT NULL DEFAULT now()                                 |
-
 
 **Constraints:** UNIQUE(business_id, sku) — SKUs are unique per business.
 
@@ -338,6 +338,7 @@ GROUP BY i.id;
 | skill_id    | UUID        | NOT NULL, REFERENCES skills(id) ON DELETE CASCADE                                                          |
 | proficiency | TEXT        | NOT NULL DEFAULT 'intermediate', CHECK (proficiency IN ('beginner', 'intermediate', 'advanced', 'expert')) |
 | created_at  | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                                     |
+
 
 **Primary key:** Composite (employee_id, skill_id).
 
@@ -437,8 +438,6 @@ GROUP BY i.id;
 | created_at           | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                     |
 | updated_at           | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                     |
 
-
-
 ---
 
 ### Table 19: `pitch_decks`
@@ -488,6 +487,7 @@ GROUP BY i.id;
 | created_at   | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                                                                      |
 | updated_at   | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                                                                      |
 
+
 **Indexes:** on `(business_id, status)`, on `(user_id)`.
 
 ---
@@ -536,7 +536,6 @@ GROUP BY i.id;
 | review_notes      | TEXT        |                                                                                                     |
 | created_at        | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                              |
 | updated_at        | TIMESTAMPTZ | NOT NULL DEFAULT now()                                                                              |
-
 
 **Indexes:** on `(agent_run_id, status)`, on `(status)` for pending-approval queries.
 
@@ -728,6 +727,7 @@ backend/
 └── .env.example
 ```
 
+
 ### Required dependencies
 
 | Package              | Purpose           | Dev? |
@@ -905,6 +905,7 @@ This serializes concurrent stock changes for the same product. The `SELECT FOR U
 - Wraps each migration in a transaction (BEGIN, execute SQL, INSERT into schema_migrations, COMMIT)
 - On failure: ROLLBACK, print error, exit with non-zero code
 - Idempotent: skips already-applied migrations
+
 
 **c) Updated npm scripts:**
 ```json
