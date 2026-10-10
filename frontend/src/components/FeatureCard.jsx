@@ -1,7 +1,17 @@
 /**
- * FeatureCard — the three empty rectangles on each module landing page.
- * Can be empty (template default), filled with a description, or clickable
- * (linking to the CRUD view for that feature).
+ * FeatureCard — the three rectangles on each module landing page.
+ *
+ * Props:
+ *   icon        — Emoji or SVG icon (optional)
+ *   title       — Card heading (optional)
+ *   description — Body text (optional)
+ *   badge       — Small live indicator pill below description (optional, string or node)
+ *   to          — Route to navigate to on click (optional; if absent, card is non-clickable)
+ *   accent      — Gradient color for icon background: "brand" | "amber" | "sky" | "emerald" | "violet"
+ *   empty       — Render as empty placeholder (template default state)
+ *
+ * Backward compatible: FinancialHub and InventoryHub don't pass `badge`,
+ * so they render exactly as before.
  */
 
 import { Link } from "react-router-dom";
@@ -10,6 +20,7 @@ export function FeatureCard({
   icon,
   title,
   description,
+  badge,
   to,
   accent = "brand",
   empty = false,
@@ -50,6 +61,13 @@ export function FeatureCard({
             <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed flex-1">
               {description}
             </p>
+          )}
+          {badge && (
+            <div className="mt-3">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 dark:bg-white/10 text-gray-600 dark:text-gray-300">
+                {badge}
+              </span>
+            </div>
           )}
         </>
       )}

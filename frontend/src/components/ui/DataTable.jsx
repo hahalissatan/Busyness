@@ -14,6 +14,7 @@ export function DataTable({
   searchPlaceholder = "Search...",
   searchParam = "search",
   actions,
+  filters,
   emptyTitle = "No records found",
   emptyMessage = "Records will appear here once created.",
   emptyIcon = "📦",
@@ -89,6 +90,7 @@ export function DataTable({
             className="input pl-9 py-2"
           />
         </div>
+        {filters}
         <div className="ml-auto">{actions?.create}</div>
       </div>
 
