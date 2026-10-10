@@ -29,10 +29,15 @@ const { Pool } = pg;
  * Determine whether SSL should be used for the database connection.
  *
  * Resolution order:
- *   1. DB_SSL env var: "true" forces SSL, "false" disables it.
+ *   1. DB_SSL env var:
+ *      "true"  = strict SSL (rejectUnauthorized: true)
+ *      "false" = no SSL
+ *      unset   = auto-detect (see below)
  *   2. Auto-detect: SSL is enabled for any host that is not localhost.
- *
- * Hosted providers (Supabase, Neon, Render, Railway, etc.) require SSL.
+ *      Uses rejectUnauthorized: false so self-signed certs from
+ *      hosted providers (Supabase, Neon, etc.) are accepted.
+ *      The connection is still encrypted — only cert chain verification
+ *      is relaxed for compatibility with hosted PostgreSQL providers.
  *
  * @returns {object | undefined} pg SSL config object, or undefined.
  */
@@ -52,7 +57,9 @@ function getSslConfig() {
   }
   const localHosts = ["localhost", "127.0.0.1", "::1"];
   const isLocal = localHosts.includes(host);
-  return isLocal ? undefined : { rejectUnauthorized: true };
+  // SSL required for hosted DBs, but accept self-signed certs
+  // (Supabase and similar providers use non-standard CA chains)
+  return isLocal ? undefined : { rejectUnauthorized: false };
 }
 
 /**

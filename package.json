@@ -1,0 +1,15 @@
+{
+  "name": "busyness",
+  "version": "0.1.0",
+  "description": "BizPilot AI — AI-powered business operations platform for SMBs",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix backend run dev",
+    "start": "npm --prefix backend run start",
+    "db:migrate": "npm --prefix backend run db:migrate",
+    "db:seed": "npm --prefix backend run db:seed",
+    "db:reset": "npm --prefix backend run db:reset",
+    "db:status": "npm --prefix backend run db:status",
+    "db:health": "npm --prefix backend run db:health"
+  }
+}
