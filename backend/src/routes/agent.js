@@ -10,6 +10,8 @@
  *   GET  /api/businesses/:businessId/agent/runs          — list recent runs
  *   GET  /api/businesses/:businessId/agent/runs/:runId   — get single run + steps
  *   POST /api/businesses/:businessId/agent/chat           — conversational AI chat
+ *   GET  /api/businesses/:businessId/agent/tools           — list available tools
+ *   POST /api/businesses/:businessId/agent/tools/:toolName — execute a read-only tool
  */
 
 import { Router } from "express";
@@ -19,6 +21,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { BadRequestError, NotFoundError } from "../utils/errors.js";
 import { runCoordinator, listAgentRuns, getAgentRun } from "../services/coordinator.js";
 import { handleConversation } from "../services/conversation.js";
+import { getToolDefinitions, executeTool } from "../services/llmProvider.js";
 
 const router = Router({ mergeParams: true });
 
@@ -118,6 +121,47 @@ router.post("/chat", asyncHandler(async (req, res) => {
   });
 
   res.status(200).json(result);
+}));
+
+// --- GET /agent/tools — List available read-only tools ------------------
+//
+// Returns the list of tools in the server-side allowlist.
+// All tools are READ-ONLY — no write, update, or delete operations.
+// businessId is always derived from the authenticated request context.
+
+router.get("/tools", asyncHandler(async (req, res) => {
+  const tools = getToolDefinitions();
+  res.json({ tools });
+}));
+
+// --- POST /agent/tools/:toolName — Execute a read-only tool ---------------
+//
+// Accepts { args: object } in the body (optional, for tools that take parameters).
+// Returns { tool, args, result } — the raw tool output as JSON.
+//
+// Security:
+//   - toolName must match a tool in the server-side allowlist
+//   - businessId is injected from the authenticated request context, never from input
+//   - Tool arguments are validated server-side
+//   - All tools are READ-ONLY
+
+router.post("/tools/:toolName", asyncHandler(async (req, res) => {
+  const { businessId } = req;
+  const { toolName } = req.params;
+  const { args } = req.body || {};
+
+  const tools = getToolDefinitions();
+  if (!tools.some((t) => t.name === toolName)) {
+    throw new NotFoundError(`Tool "${toolName}" not found`);
+  }
+
+  const result = await executeTool(toolName, businessId, args || {});
+
+  res.json({
+    tool: toolName,
+    args: args || {},
+    result,
+  });
 }));
 
 export default router;

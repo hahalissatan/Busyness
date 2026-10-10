@@ -1,0 +1,13 @@
+{
+  "name": "busyness-mcp-server",
+  "version": "1.0.0",
+  "description": "Read-only MCP server bridging WorkBuddy AI to the BUSYNESS backend API",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "*"
+  }
+}
