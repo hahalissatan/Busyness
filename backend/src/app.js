@@ -27,6 +27,7 @@ import financialsRoutes from "./routes/financials.js";
 import inventoryRoutes from "./routes/inventory.js";
 import taskRoutes from "./routes/tasks.js";
 import marketingRoutes from "./routes/marketing.js";
+import agentRoutes from "./routes/agent.js";
 
 export function createApp() {
   const app = express();
@@ -111,6 +112,15 @@ export function createApp() {
   // Endpoints:
   //   /projects, /personas, /drafts, /pitch-decks, /overview
   app.use("/api/businesses/:businessId/marketing", marketingRoutes);
+
+  // --- Agent routes (auth + business membership required) ---
+  // The agent router applies authenticateToken + requireBusinessAccess
+  // at the router level, so every endpoint is automatically protected.
+  // Endpoints:
+  //   POST /runs       — create + execute an agent run
+  //   GET  /runs       — list recent agent runs
+  //   GET  /runs/:runId — get a single agent run with steps
+  app.use("/api/businesses/:businessId/agent", agentRoutes);
 
   // --- 404 handler ---
   app.use((req, res) => {

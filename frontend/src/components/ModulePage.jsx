@@ -9,11 +9,17 @@
  *
  * Props let each module customise the title, accent, and feature list.
  * `messages` (optional) renders a chat thread above the feature cards.
+ *
+ * Chat is wired to the backend coordinator agent:
+ *   POST /api/businesses/:businessId/agent/runs { goal }
+ * Returns real database query results scoped to the authenticated business.
  */
 
 import { useState } from "react";
 import { ChatInput } from "./ChatInput.jsx";
 import { FeatureCard } from "./FeatureCard.jsx";
+import { api } from "../api/client.js";
+import { useAuth } from "../context/AuthContext.jsx";
 
 export function ModulePage({
   title,
@@ -24,9 +30,12 @@ export function ModulePage({
   module = "financial",
   children,
 }) {
+  const { business } = useAuth();
   const [thread, setThread] = useState([]);
+  const [thinking, setThinking] = useState(false);
 
   const handleAsk = async (question) => {
+    // If a module provides a custom onAsk, use it (future specialist routing)
     if (onAsk) {
       const result = await onAsk(question);
       if (result !== undefined) {
@@ -34,16 +43,33 @@ export function ModulePage({
         return;
       }
     }
-    // Default fallback echo
-    setThread((t) => [
-      ...t,
-      { role: "user", text: question },
-      {
-        role: "assistant",
-        text:
-          "I'm a demo agent. Connect a backend handler via the `onAsk` prop to enable real responses.",
-      },
-    ]);
+
+    // Call the backend coordinator agent
+    setThinking(true);
+    try {
+      const res = await api.post(`/api/businesses/${business?.id}/agent/runs`, {
+        goal: question,
+      });
+
+      const summary = res?.final_report?.summary || "No response from coordinator.";
+
+      setThread((t) => [
+        ...t,
+        { role: "user", text: question },
+        { role: "assistant", text: summary },
+      ]);
+    } catch (err) {
+      setThread((t) => [
+        ...t,
+        { role: "user", text: question },
+        {
+          role: "assistant",
+          text: `Sorry, I couldn't process that request. ${err.message || "Please try again."}`,
+        },
+      ]);
+    } finally {
+      setThinking(false);
+    }
   };
 
   return (
@@ -78,6 +104,20 @@ export function ModulePage({
               </div>
             </div>
           ))}
+          {/* Thinking indicator */}
+          {thinking && (
+            <div className="glass-card mr-12 px-4 py-3 text-sm">
+              <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                Assistant
+              </div>
+              <div className="flex items-center gap-2 text-gray-400 dark:text-gray-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse" style={{ animationDelay: "150ms" }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse" style={{ animationDelay: "300ms" }} />
+                <span className="ml-1">Processing your request…</span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -93,7 +133,7 @@ export function ModulePage({
 
       {/* Chat input pinned to page bottom area */}
       <div className="sticky bottom-4 mt-4">
-        <ChatInput onSend={handleAsk} placeholder={chatPlaceholder} module={module} />
+        <ChatInput onSend={handleAsk} placeholder={chatPlaceholder} module={module} disabled={thinking} />
       </div>
     </div>
   );
