@@ -77,9 +77,12 @@ export const pool = new Pool({
   user: process.env.DB_USER || "busyness",
   password: process.env.DB_PASSWORD || "",
   ssl: getSslConfig(),
-  max: 10,
+  max: 5,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  connectionTimeoutMillis: 10000,
+  // Supabase PgBouncer compatibility — disables prepared statements
+  // which are not supported in transaction mode pooling
+  statement_timeout: 30000,
 });
 
 /**
