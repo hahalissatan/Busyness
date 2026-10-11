@@ -1,7 +1,9 @@
 /**
  * api/client.js — Centralized API client for Busyness.
  *
- * - Uses Vite proxy (/api → http://localhost:3001/api in dev)
+ * - In development: Uses Vite proxy (/api → http://localhost:3001/api)
+ * - In production: Uses VITE_API_BASE_URL env var to point to the backend
+ *   (e.g., https://busyness-api.onrender.com)
  * - Attaches Bearer token from localStorage
  * - Parses pagination from list responses
  * - Handles 401 by clearing session and redirecting to /login
@@ -9,7 +11,15 @@
  */
 
 const TOKEN_KEY = "busyness_token";
-const API_BASE_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+
+/**
+ * Get the API base URL.
+ * In development, the Vite proxy handles /api → localhost:3001, so we use
+ * relative paths (just "/api/...").
+ * In production, VITE_API_BASE_URL must be set to the backend URL (e.g.
+ * "https://busyness-api.onrender.com"). All API calls are sent there directly.
+ */
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -23,19 +33,18 @@ function buildHeaders(extra = {}) {
 }
 
 function buildUrl(path, params = {}) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-
-  const url = API_BASE_URL
-    ? new URL(normalizedPath, `${API_BASE_URL}/`)
-    : new URL(normalizedPath, window.location.origin);
-
+  // Prepend API_BASE_URL in production; in dev it's "" (relative, uses proxy)
+  const fullPath = API_BASE_URL ? `${API_BASE_URL}${path}` : path;
+  const url = new URL(fullPath, window.location.origin);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== "") {
       url.searchParams.set(key, value);
     }
   }
-
-  return API_BASE_URL ? url.toString() : url.pathname + url.search;
+  // If API_BASE_URL is set, url.href is the full absolute URL.
+  // If not set (dev mode), url.pathname + url.search gives the relative path
+  // that the Vite proxy will intercept.
+  return API_BASE_URL ? url.href : (url.pathname + url.search);
 }
 
 async function request(method, path, { body, params } = {}) {
