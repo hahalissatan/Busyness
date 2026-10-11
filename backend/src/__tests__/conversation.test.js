@@ -364,16 +364,20 @@ describe("Conversational AI — Tool allowlist enforcement", () => {
     expect(toolNames).toContain("search_products");
   });
 
-  it("should not include any write or delete tools in the allowlist", () => {
+  it("should not include any dangerous write or delete tools in the allowlist", () => {
     const tools = getToolDefinitions();
     const toolNames = tools.map((t) => t.name);
 
     // Ensure no dangerous tools are present
     expect(toolNames).not.toContain("delete_product");
     expect(toolNames).not.toContain("update_stock");
-    expect(toolNames).not.toContain("create_invoice");
     expect(toolNames).not.toContain("drop_table");
     expect(toolNames).not.toContain("execute_sql");
+    expect(toolNames).not.toContain("delete_invoice");
+    expect(toolNames).not.toContain("delete_customer");
+
+    // create_invoice IS now allowed — it's a validated write tool
+    expect(toolNames).toContain("create_invoice");
   });
 });
 

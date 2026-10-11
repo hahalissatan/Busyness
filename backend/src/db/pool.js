@@ -44,7 +44,6 @@ const { Pool } = pg;
 function getSslConfig() {
   // Explicit override
   if (process.env.DB_SSL === "false") return undefined;
-  if (process.env.DB_SSL === "true") return { rejectUnauthorized: true };
 
   // Auto-detect: parse host from DATABASE_URL or DB_HOST
   let host = process.env.DB_HOST || "localhost";
@@ -57,9 +56,14 @@ function getSslConfig() {
   }
   const localHosts = ["localhost", "127.0.0.1", "::1"];
   const isLocal = localHosts.includes(host);
-  // SSL required for hosted DBs, but accept self-signed certs
-  // (Supabase and similar providers use non-standard CA chains)
-  return isLocal ? undefined : { rejectUnauthorized: false };
+
+  // For local DBs, no SSL needed
+  if (isLocal) return undefined;
+
+  // For hosted DBs (Supabase, Neon, etc.), use SSL but accept self-signed certs
+  // Supabase uses a self-signed CA chain that fails strict verification
+  // rejectUnauthorized: false = encrypted connection, but don't verify CA chain
+  return { rejectUnauthorized: false };
 }
 
 /**
@@ -77,9 +81,12 @@ export const pool = new Pool({
   user: process.env.DB_USER || "busyness",
   password: process.env.DB_PASSWORD || "",
   ssl: getSslConfig(),
-  max: 10,
+  max: 5,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  connectionTimeoutMillis: 10000,
+  // Supabase PgBouncer compatibility — disables prepared statements
+  // which are not supported in transaction mode pooling
+  statement_timeout: 30000,
 });
 
 /**

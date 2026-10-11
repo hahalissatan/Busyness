@@ -16,9 +16,19 @@
  *     the client. Tool execution is server-side only.
  *   - businessId is derived from the authenticated request context
  *     and passed to tool functions — never from user input.
+ *   - userId is derived from the authenticated JWT and passed to
+ *     write-capable tools for audit logging — never from AI output.
  *
  * No new dependencies are required. Uses Node.js built-in fetch (Node 18+).
  */
+
+import {
+  searchCustomers,
+  createInvoiceFromChat,
+  listInvoices,
+  getInvoice,
+  checkExistingInvoices,
+} from "./invoiceAgent.js";
 
 // --- Provider detection ---------------------------------------------------
 
@@ -49,12 +59,17 @@ export function getProviderInfo() {
  * Each tool has:
  *   name        — unique tool name
  *   description — what the tool does (sent to LLM as function description)
- *   execute    — server-side async function(businessId, args) => result
+ *   execute    — server-side async function(businessId, args, userId) => result
+ *   writable   — true if this tool performs write operations (default: false)
+ *   params     — JSON schema for tool parameters (sent to live LLM)
  *
  * businessId is ALWAYS injected from the authenticated request context,
  * NEVER from the LLM output or client input.
+ * userId is ALWAYS injected from the authenticated JWT for write tools.
  *
- * All tools are READ-ONLY — no write or destructive operations.
+ * Read-only tools perform queries. Write tools perform inserts/updates
+ * but always through the existing validated backend services with
+ * transactional integrity.
  */
 const TOOL_ALLOWLIST = [
   {
@@ -277,6 +292,195 @@ const TOOL_ALLOWLIST = [
         search_term: searchTerm,
       };
     },
+    params: {
+      type: "object",
+      properties: {
+        search_term: { type: "string", description: "Product name, SKU, or description to search for" },
+      },
+      required: ["search_term"],
+    },
+  },
+  // --- Write-capable tools (invoice creation) ---
+  {
+    name: "search_customers",
+    description: "Search for customers by name, email, or phone within the business. Use this to resolve a customer name before creating an invoice.",
+    writable: false,
+    async execute(businessId, args = {}) {
+      const searchTerm = args.search_term || args.customer_name;
+      if (!searchTerm || typeof searchTerm !== "string" || searchTerm.trim().length < 1) {
+        return { error: "search_term must be a non-empty string" };
+      }
+      return searchCustomers(businessId, searchTerm.trim());
+    },
+    params: {
+      type: "object",
+      properties: {
+        search_term: { type: "string", description: "Customer name, email, or phone to search for" },
+      },
+      required: ["search_term"],
+    },
+  },
+  {
+    name: "create_invoice",
+    description: "Create and save a draft invoice for an existing authorized customer. The amount is the total including tax. If the customer name is ambiguous, the tool will ask for clarification. If the amount is missing, the tool will ask for it. Never invent values — ask the user for missing required information.",
+    writable: true,
+    async execute(businessId, args = {}, userId) {
+      return createInvoiceFromChat({
+        businessId,
+        userId,
+        args: {
+          customer_name: args.customer_name,
+          amount: args.amount,
+          description: args.description,
+          idempotency_key: args.idempotency_key,
+        },
+      });
+    },
+    params: {
+      type: "object",
+      properties: {
+        customer_name: {
+          type: "string",
+          description: "The customer name as stated by the user",
+        },
+        amount: {
+          type: ["number", "null"],
+          description: "The total invoice amount including tax (e.g., 500.00). Null if not yet provided.",
+        },
+        description: {
+          type: ["string", "null"],
+          description: "Description of the goods or services being invoiced",
+        },
+        idempotency_key: {
+          type: ["string", "null"],
+          description: "Idempotency key for duplicate prevention. Generated automatically if not provided.",
+        },
+      },
+      required: ["customer_name"],
+    },
+  },
+  {
+    name: "list_invoices",
+    description: "List recent invoices for the business. Optionally filter by status (draft, unpaid, partially_paid, paid, overdue).",
+    writable: false,
+    async execute(businessId, args = {}) {
+      return listInvoices(businessId, args);
+    },
+    params: {
+      type: "object",
+      properties: {
+        status: {
+          type: ["string", "null"],
+          description: "Optional status filter: draft, unpaid, partially_paid, paid, or overdue",
+        },
+        limit: {
+          type: ["number", "null"],
+          description: "Maximum number of invoices to return (default 10, max 20)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_invoice",
+    description: "Get full details of a specific invoice by ID, including line items and payment status.",
+    writable: false,
+    async execute(businessId, args = {}) {
+      const invoiceId = args.invoice_id;
+      if (!invoiceId || typeof invoiceId !== "string") {
+        return { error: "invoice_id is required" };
+      }
+      const result = await getInvoice(businessId, invoiceId);
+      if (!result) {
+        return { error: "Invoice not found" };
+      }
+      return result;
+    },
+    params: {
+      type: "object",
+      properties: {
+        invoice_id: { type: "string", description: "The invoice UUID" },
+      },
+      required: ["invoice_id"],
+    },
+  },
+  {
+    name: "check_existing_invoices",
+    description: "Check if there are existing invoices for a customer. Use this to answer questions like 'Did we already invoice CTmart?'",
+    writable: false,
+    async execute(businessId, args = {}) {
+      const customerName = args.customer_name;
+      if (!customerName || typeof customerName !== "string") {
+        return { error: "customer_name is required" };
+      }
+      return checkExistingInvoices(businessId, customerName);
+    },
+    params: {
+      type: "object",
+      properties: {
+        customer_name: { type: "string", description: "Customer name to check" },
+      },
+      required: ["customer_name"],
+    },
+  },
+  {
+    name: "create_product",
+    description: "Create a new product in the inventory. Requires a name and SKU. Optional fields: unit_cost, min_stock_threshold, description, is_active.",
+    writable: true,
+    async execute(businessId, args = {}, userId) {
+      const { query } = await import("../db/pool.js");
+      const { name, sku, description, unit_cost, min_stock_threshold, is_active } = args;
+
+      if (!name || typeof name !== "string" || name.trim().length < 1) {
+        return { status: "needs_clarification", message: "A product name is required. What would you like to name the product?" };
+      }
+      if (!sku || typeof sku !== "string" || sku.trim().length < 1) {
+        return { status: "needs_clarification", message: `A SKU is required for "${name}". What SKU should I use? (e.g., "PEN-001")` };
+      }
+
+      try {
+        const result = await query(
+          `INSERT INTO products
+             (business_id, name, sku, description, stock_quantity, min_stock_threshold,
+              unit_cost, is_active)
+           VALUES ($1, $2, $3, $4, 0, $5, $6, $7)
+           RETURNING id, business_id, name, sku, description, stock_quantity,
+              min_stock_threshold, unit_cost, is_active, created_at`,
+          [
+            businessId,
+            name.trim().slice(0, 200),
+            sku.trim().slice(0, 50),
+            description ? String(description).slice(0, 2000) : null,
+            min_stock_threshold || 0,
+            unit_cost || 0,
+            is_active !== false,
+          ]
+        );
+
+        return {
+          status: "success",
+          product: result.rows[0],
+          message: `Product "${result.rows[0].name}" created successfully with SKU ${result.rows[0].sku}.`,
+        };
+      } catch (err) {
+        if (err.code === "23505") {
+          return { status: "error", message: `A product with SKU "${sku}" already exists. Please use a different SKU.` };
+        }
+        return { status: "error", message: `Failed to create product: ${err.message || "database error"}` };
+      }
+    },
+    params: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Product name" },
+        sku: { type: "string", description: "Stock keeping unit (unique identifier)" },
+        description: { type: ["string", "null"], description: "Product description" },
+        unit_cost: { type: ["number", "null"], description: "Cost per unit" },
+        min_stock_threshold: { type: ["number", "null"], description: "Minimum stock level before reorder alert" },
+        is_active: { type: ["boolean", "null"], description: "Whether the product is active (default: true)" },
+      },
+      required: ["name"],
+    },
   },
 ];
 
@@ -285,10 +489,14 @@ const TOOL_MAP = new Map(TOOL_ALLOWLIST.map((t) => [t.name, t]));
 
 /**
  * Get the list of tool definitions (for sending to LLM as function descriptions).
- * @returns {Array<{name, description}>}
+ * @returns {Array<{name, description, params}>}
  */
 export function getToolDefinitions() {
-  return TOOL_ALLOWLIST.map((t) => ({ name: t.name, description: t.description }));
+  return TOOL_ALLOWLIST.map((t) => ({
+    name: t.name,
+    description: t.description,
+    params: t.params || { type: "object", properties: {} },
+  }));
 }
 
 /**
@@ -297,15 +505,18 @@ export function getToolDefinitions() {
  * SECURITY:
  *   - Only tools in TOOL_ALLOWLIST can be executed — no arbitrary names.
  *   - businessId is always injected from the authenticated request context.
+ *   - userId is always injected from the authenticated JWT.
  *   - Tool arguments are validated server-side.
+ *   - Write tools receive userId for audit logging.
  *
  * @param {string} toolName — must match a tool in the allowlist
  * @param {string} businessId — verified business UUID from auth context
  * @param {object} args — tool arguments (validated per tool)
+ * @param {string} [userId] — verified user UUID from JWT (required for write tools)
  * @returns {Promise<object>} tool result
  * @throws {Error} if tool name is not in the allowlist
  */
-export async function executeTool(toolName, businessId, args = {}) {
+export async function executeTool(toolName, businessId, args = {}, userId) {
   const tool = TOOL_MAP.get(toolName);
   if (!tool) {
     throw new Error(`Tool "${toolName}" is not in the server-side allowlist`);
@@ -315,7 +526,11 @@ export async function executeTool(toolName, businessId, args = {}) {
   if (argsStr.length > 2000) {
     throw new Error("Tool arguments exceed maximum size (2000 chars)");
   }
-  return tool.execute(businessId, args);
+  // Write tools require userId
+  if (tool.writable && !userId) {
+    throw new Error(`Tool "${toolName}" requires authenticated userId`);
+  }
+  return tool.execute(businessId, args, userId);
 }
 
 // --- Mock LLM ------------------------------------------------------------
@@ -325,10 +540,12 @@ export async function executeTool(toolName, businessId, args = {}) {
  *
  * This is a deterministic, rule-based "LLM" that:
  *   1. Detects greetings → responds with a friendly greeting
- *   2. Detects data questions → calls the appropriate tool and formats results
- *   3. Detects follow-up references → uses conversation context to resolve
- *   4. Detects ambiguous requests → asks for clarification
- *   5. Falls back → offers suggestions
+ *   2. Detects invoice creation requests → resolves customer, validates, creates
+ *   3. Detects data questions → calls the appropriate tool and formats results
+ *   4. Detects invoice questions (existing invoices, status) → answers
+ *   5. Detects follow-up references → uses conversation context to resolve
+ *   6. Detects ambiguous requests → asks for clarification
+ *   7. Falls back → offers suggestions
  *
  * All responses are clearly labelled as mock (no AI model was called).
  *
@@ -336,9 +553,10 @@ export async function executeTool(toolName, businessId, args = {}) {
  * @param {string} params.message — user's message
  * @param {Array<{role: string, content: string}>} params.context — prior messages
  * @param {string} params.businessId — verified business UUID
+ * @param {string} [params.userId] — verified user UUID (for write operations)
  * @returns {Promise<{reply: string, tool_calls: Array, provider: string}>}
  */
-export async function mockLLM({ message, context, businessId }) {
+export async function mockLLM({ message, context, businessId, userId }) {
   const lower = message.toLowerCase().trim();
   const toolCalls = [];
 
@@ -375,27 +593,115 @@ export async function mockLLM({ message, context, businessId }) {
     };
   }
 
-  // 3. Data question detection — map keywords to tools
+  // 3. Invoice questions — "did we already invoice X", "show invoices", etc.
+  // (Checked BEFORE creation detection so questions aren't mistaken for actions)
+
+  // 3a. Follow-up: "show me the invoice I created earlier / previously"
+  // (Checked BEFORE generic "show invoices" so it retrieves from context, not the full list)
+  if (lower.includes("show me") && lower.includes("invoice") &&
+      (lower.includes("earlier") || lower.includes("created") || lower.includes("previous") || lower.includes("just made"))) {
+    const lastAssistant = [...context].reverse().find((m) => m.role === "assistant" && m.content.includes("Invoice created"));
+    if (lastAssistant) {
+      return {
+        reply: `[Mock LLM] ${lastAssistant.content.replace("[Mock LLM] ", "")}`,
+        tool_calls: [],
+        provider: "mock",
+      };
+    }
+    // If no prior invoice in context, fall through to generic list
+  }
+
+  if (lower.includes("did we invoice") || lower.includes("did we already invoice") ||
+      lower.includes("already invoice") || lower.includes("have we invoiced") ||
+      lower.includes("have we billed")) {
+    // Extract customer name
+    const match = message.match(/(?:invoice|invoiced|bill|billed)\s+(.+?)(?:\s*$|\?$)/i);
+    const customerName = match ? match[1].replace(/[?]/g, "").trim() : "";
+    if (customerName && customerName.length >= 2) {
+      const result = await executeTool("check_existing_invoices", businessId, { customer_name: customerName }, userId);
+      toolCalls.push({ tool: "check_existing_invoices", args: { customer_name: customerName } });
+
+      if (result.found) {
+        const invList = result.invoices.map((inv) =>
+          `  - ${inv.invoice_number} | ${inv.status} | ${inv.issue_date} | RM${inv.total.toFixed(2)}`
+        ).join("\n");
+        return {
+          reply: `[Mock LLM] Yes, there are ${result.count} invoice(s) for "${customerName}":\n${invList}`,
+          tool_calls: toolCalls,
+          provider: "mock",
+        };
+      } else {
+        return {
+          reply: `[Mock LLM] No invoices found for "${customerName}". Would you like me to create one?`,
+          tool_calls: toolCalls,
+          provider: "mock",
+        };
+      }
+    }
+  }
+
+  // Show/list invoices — "show invoices", "what invoices do we have", etc.
+  if (lower.includes("invoice") && (lower.includes("show") || lower.includes("list") || lower.includes("recent") || lower.includes("what") || lower.includes("all"))) {
+    const result = await executeTool("list_invoices", businessId, {}, userId);
+    toolCalls.push({ tool: "list_invoices", args: {} });
+
+    if (result.count === 0) {
+      return {
+        reply: `[Mock LLM] No invoices found. Would you like to create one? Just say "create an invoice for [customer name]".`,
+        tool_calls: toolCalls,
+        provider: "mock",
+      };
+    }
+
+    const invList = result.items.slice(0, 5).map((inv) =>
+      `  - ${inv.invoice_number} | ${inv.customer_name} | ${inv.status} | RM${inv.total.toFixed(2)}`
+    ).join("\n");
+    const extra = result.count > 5 ? `\n  ...and ${result.count - 5} more.` : "";
+    return {
+      reply: `[Mock LLM] Here are your recent invoices (${result.count} total):\n${invList}${extra}`,
+      tool_calls: toolCalls,
+      provider: "mock",
+    };
+  }
+
+  // 4. Invoice creation detection — natural language understanding
+  const invoiceResult = await detectInvoiceCreation(lower, message, context, businessId, userId);
+  if (invoiceResult) {
+    return invoiceResult;
+  }
+
+  // 4b. Product creation detection — "add product(s): X and Y", "create product X", etc.
+  const productResult = await detectProductCreation(lower, message, businessId, userId, toolCalls);
+  if (productResult) {
+    return productResult;
+  }
+
+  // 5. Data question detection — map keywords to tools
   const toolTriggers = [
-    { tool: "get_low_stock", patterns: ["low stock", "low-stock", "stock alert", "reorder", "restock", "running low"] },
-    { tool: "get_inventory_summary", patterns: ["inventory summary", "stock summary", "how much stock", "inventory status", "product count", "inventory overview"] },
-    { tool: "get_task_overview", patterns: ["task summary", "overdue task", "task overview", "what tasks", "task status", "pending task"] },
-    { tool: "get_team_workload", patterns: ["workload", "team workload", "who is busy", "team capacity", "team members"] },
-    { tool: "get_financial_overview", patterns: ["financial summary", "financial overview", "revenue", "invoice summary", "cashflow", "cash flow", "outstanding"] },
-    { tool: "get_customer_summary", patterns: ["customer summary", "how many customers", "customer list", "client"] },
-    { tool: "get_marketing_overview", patterns: ["marketing summary", "marketing overview", "campaign status", "marketing status", "how many campaigns"] },
+    { tool: "get_low_stock", patterns: ["low stock", "low-stock", "stock alert", "reorder", "restock", "running low", "low on stock", "running out"] },
+    { tool: "get_inventory_summary", patterns: ["inventory summary", "stock summary", "how much stock", "inventory status", "product count", "inventory overview", "show inventory", "stock overview", "what.*inventory", "my inventory", "inventory info"] },
+    { tool: "get_task_overview", patterns: ["task summary", "overdue task", "task overview", "what tasks", "task status", "pending task", "show tasks", "my tasks", "task list"] },
+    { tool: "get_team_workload", patterns: ["workload", "team workload", "who is busy", "team capacity", "team members", "team overview"] },
+    { tool: "get_financial_overview", patterns: ["financial summary", "financial overview", "revenue", "invoice summary", "cashflow", "cash flow", "outstanding", "financial info", "money summary"] },
+    { tool: "get_customer_summary", patterns: ["customer summary", "how many customers", "customer list", "client", "show customers", "show.*customers", "customer info", "customer count", "how many clients", "list customers", "customers overview"] },
+    { tool: "get_marketing_overview", patterns: ["marketing summary", "marketing overview", "campaign status", "marketing status", "how many campaigns", "show marketing", "marketing info"] },
   ];
 
-  // Product search detection
-  if (lower.includes("find product") || lower.includes("search product") || lower.includes("look up product")) {
+  // Product search detection — supports "find product X", "search for X",
+  // "look up X", "find X" where X is a product name
+  const productSearchMatch =
+    lower.includes("find product") || lower.includes("search product") || lower.includes("look up product") ||
+    (/^(?:search|find|look\s+up)\s+(?:for\s+)?(?:product\s+)?(.{2,})/i.test(lower) && !lower.includes("invoice"));
+  if (productSearchMatch) {
     // Extract search term
     let term = lower;
-    const removePhrases = ["find product", "search product", "look up product", "product details", "product info"];
+    const removePhrases = ["find product", "search product", "look up product", "product details", "product info",
+      "search for", "find", "look up", "look", "up", "search", "product", "item", "the", "a", "an",
+      "show", "me", "called", "named", "with", "about", "info", "details", "information"];
     for (const p of removePhrases) {
       term = term.replace(p, " ");
     }
-    const filler = ["called", "named", "for", "me", "show", "find", "search", "look", "up", "product", "item", "the", "a", "an", "with", "about", "info", "details", "information"];
-    const words = term.split(/\s+/).filter((w) => !filler.includes(w) && w.length > 0);
+    const words = term.split(/\s+/).filter((w) => w.length > 0);
     const searchTerm = words.join(" ").trim();
 
     if (!searchTerm || searchTerm.length < 2) {
@@ -430,7 +736,13 @@ export async function mockLLM({ message, context, businessId }) {
 
   // Check other tool triggers
   for (const trigger of toolTriggers) {
-    if (trigger.patterns.some((p) => lower.includes(p))) {
+    if (trigger.patterns.some((p) => {
+      // Support regex patterns (containing .* or ^ or $) and literal substrings
+      if (p.includes(".*") || p.includes("^") || p.includes("$")) {
+        return new RegExp(p, "i").test(lower);
+      }
+      return lower.includes(p);
+    })) {
       const result = await executeTool(trigger.tool, businessId);
       toolCalls.push({ tool: trigger.tool, args: {} });
 
@@ -453,6 +765,49 @@ export async function mockLLM({ message, context, businessId }) {
     if (lastAssistant) {
       // Try to infer what the user is following up on
       const lastContent = lastAssistant.content.toLowerCase();
+
+      // Check if the last assistant message was about invoice creation
+      if (lastContent.includes("invoice created") || lastContent.includes("invoice number")) {
+        // "What about [customer name]?" after an invoice — treat as a new invoice request
+        const nameMatch = message.match(/(?:what|how)\s+about\s+(.+?)(?:\?|,\s*amount\s|\s+for\s+(?:rm|ringgit|\$)|$)/i);
+        if (nameMatch) {
+          const customerName = nameMatch[1].replace(/[?]/g, "").trim();
+          if (customerName.length >= 2) {
+            // Check for amount in the same message
+            const amount = extractAmount(message);
+            if (amount) {
+              // Try to create an invoice for this customer
+              const idempotencyKey = `chat-${Date.now()}-${customerName.slice(0, 10).replace(/\s/g, "-")}`;
+              const result = await executeTool("create_invoice", businessId, {
+                customer_name: customerName,
+                amount,
+                description: null,
+                idempotency_key: idempotencyKey,
+              }, userId);
+              toolCalls.push({ tool: "create_invoice", args: { customer_name: customerName, amount } });
+
+              if (result.status === "success" && result.invoice) {
+                return {
+                  reply: formatInvoiceConfirmation(result.invoice),
+                  tool_calls: toolCalls,
+                  provider: "mock",
+                };
+              }
+              return {
+                reply: `[Mock LLM] ${result.message || "I couldn't create the invoice. Please try again."}`,
+                tool_calls: toolCalls,
+                provider: "mock",
+              };
+            }
+            // No amount — ask for it
+            return {
+              reply: `[Mock LLM] I can create an invoice for "${customerName}". How much should I invoice them for?`,
+              tool_calls: [],
+              provider: "mock",
+            };
+          }
+        }
+      }
 
       // Check if they're asking about something mentioned before
       for (const trigger of toolTriggers) {
@@ -541,7 +896,411 @@ function formatToolResult(toolName, output) {
   }
 }
 
-// --- Live LLM (placeholder for future) -----------------------------------
+// --- Invoice creation intent detection (mock LLM natural language) --------
+
+/**
+ * Detect if the user's message is a request to create an invoice.
+ * This implements natural-language understanding for the mock LLM.
+ *
+ * Recognized patterns:
+ *   "Add an invoice for CTmart"
+ *   "I want to create an invoice for CTmart"
+ *   "Can you bill CTmart?"
+ *   "Please prepare an invoice for our customer CTmart"
+ *   "Create a new invoice for CTmart for RM500"
+ *   "Make an invoice for CTmart and save it as a draft"
+ *   "Prepare the invoice but don't save it yet"
+ *
+ * Also handles follow-up context:
+ *   - "Change that invoice to RM800" — modifies the last created invoice's args
+ *   - "Show me the invoice I created earlier" — retrieves last created invoice
+ *
+ * @returns {Promise<object|null>} — mock LLM response object, or null if not an invoice request
+ */
+async function detectInvoiceCreation(lower, originalMessage, context, businessId, userId) {
+  const toolCalls = [];
+
+  // Detect invoice creation intent
+  const createPatterns = [
+    /(?:add|create|make|prepare|issue|generate)\s+(?:an?\s+)?invoice\s+(?:for|to)\s+/i,
+    /(?:bill|invoice)\s+\w+/i,
+    /(?:i\s+want\s+to|can\s+you|please|could\s+you)\s+.*(?:invoice|bill)/i,
+    /create\s+(?:a\s+)?new\s+invoice/i,
+  ];
+
+  const isCreateIntent = createPatterns.some((p) => p.test(originalMessage));
+
+  // Detect "prepare but don't save"
+  const isPrepareOnly = lower.includes("don't save") || lower.includes("do not save") ||
+    lower.includes("without saving") || lower.includes("but don't") || lower.includes("prepare but");
+
+  // Detect "how do I create" — instruction question, not action
+  const isInstructionQuestion = lower.includes("how do i") || lower.includes("how to") ||
+    lower.includes("how can i") || lower.includes("what do i need");
+
+  if (isInstructionQuestion) {
+    return {
+      reply: "[Mock LLM] To create an invoice, just tell me the customer name and the amount. For example:\n\n" +
+        '  "Create an invoice for Cafe Maju for RM500"\n' +
+        '  "Add an invoice for Mini Mart Sejahtera for RM1200"\n\n' +
+        "I'll look up the customer, create a draft invoice, and show you the details.",
+      tool_calls: [],
+      provider: "mock",
+    };
+  }
+
+  if (!isCreateIntent) {
+    // Check for follow-up context — "change that invoice", "show me the invoice"
+    if (lower.includes("change") && (lower.includes("invoice") || lower.includes("it")) && context.length > 0) {
+      // Look for a recently created invoice in context
+      const lastAssistant = [...context].reverse().find((m) => m.role === "assistant" && m.content.includes("Invoice created"));
+      if (lastAssistant) {
+        // Extract new amount from message
+        const amountMatch = originalMessage.match(/(?:rm|ringgit|\$)?\s*(\d+(?:\.\d{1,2})?)/i);
+        if (amountMatch) {
+          const newAmount = parseFloat(amountMatch[1]);
+          // Extract invoice number from previous response
+          const invMatch = lastAssistant.content.match(/Invoice number:\s*(\S+)/);
+          if (invMatch) {
+            return {
+              reply: `[Mock LLM] I found your previous invoice (${invMatch[1]}). To change the amount, please open the invoice and edit it directly. ` +
+                `For security, I can only create new invoices via chat — modifications must be done through the invoice detail page.`,
+              tool_calls: [],
+              provider: "mock",
+            };
+          }
+        }
+      }
+    }
+
+    // "Show me the invoice I created earlier"
+    if (lower.includes("show me") && lower.includes("invoice") && (lower.includes("earlier") || lower.includes("created") || lower.includes("previous"))) {
+      const lastAssistant = [...context].reverse().find((m) => m.role === "assistant" && m.content.includes("Invoice created"));
+      if (lastAssistant) {
+        return {
+          reply: `[Mock LLM] ${lastAssistant.content.replace("[Mock LLM] ", "")}`,
+          tool_calls: [],
+          provider: "mock",
+        };
+      }
+    }
+
+    return null; // Not an invoice creation request
+  }
+
+  // --- Parse the invoice creation request ---
+
+  // Extract customer name
+  const customerName = extractCustomerName(originalMessage);
+  if (!customerName || customerName.length < 2) {
+    return {
+      reply: "[Mock LLM] I'd be happy to create an invoice. Which customer should I create it for? Please provide the customer name.",
+      tool_calls: [],
+      provider: "mock",
+    };
+  }
+
+  // Extract amount
+  const amount = extractAmount(originalMessage);
+
+  // Extract description
+  const description = extractDescription(originalMessage);
+
+  // If "prepare but don't save" — return preview without saving
+  if (isPrepareOnly) {
+    return {
+      reply: `[Mock LLM] Here's a preview of the invoice I would create:\n\n` +
+        `  Customer: ${customerName}\n` +
+        (amount ? `  Amount: RM${amount.toFixed(2)}\n` : "  Amount: (not specified)\n") +
+        (description ? `  Description: ${description}\n` : "") +
+        `\nThis is a preview — nothing has been saved. When you're ready, say "create an invoice for ${customerName}${amount ? ` for RM${amount.toFixed(2)}` : ""}" and I'll save it.`,
+      tool_calls: [],
+      provider: "mock",
+    };
+  }
+
+  // If amount is missing — ask for it
+  if (!amount) {
+    return {
+      reply: `[Mock LLM] I can create an invoice for "${customerName}". How much should I invoice them for? Please provide the amount (e.g., "RM500" or "500").`,
+      tool_calls: [],
+      provider: "mock",
+    };
+  }
+
+  // --- Execute the invoice creation ---
+  const idempotencyKey = `chat-${Date.now()}-${customerName.slice(0, 10).replace(/\s/g, "-")}`;
+
+  try {
+    const result = await executeTool("create_invoice", businessId, {
+      customer_name: customerName,
+      amount,
+      description,
+      idempotency_key: idempotencyKey,
+    }, userId);
+
+    toolCalls.push({ tool: "create_invoice", args: { customer_name: customerName, amount, description } });
+
+    if (result.status === "success" && result.invoice) {
+      const inv = result.invoice;
+      return {
+        reply: formatInvoiceConfirmation(inv),
+        tool_calls: toolCalls,
+        provider: "mock",
+      };
+    }
+
+    if (result.status === "needs_clarification") {
+      let reply = `[Mock LLM] ${result.message}`;
+      if (result.clarification && result.clarification.customer_list) {
+        reply += `\n\n${result.clarification.customer_list}`;
+      }
+      return {
+        reply,
+        tool_calls: toolCalls,
+        provider: "mock",
+      };
+    }
+
+    // Error
+    return {
+      reply: `[Mock LLM] ${result.message || "I couldn't create the invoice. Please try again or create it manually."}`,
+      tool_calls: toolCalls,
+      provider: "mock",
+    };
+  } catch (err) {
+    return {
+      reply: `[Mock LLM] I encountered an error while creating the invoice: ${err.message}. Please try again or create the invoice manually from the Invoices page.`,
+      tool_calls: toolCalls,
+      provider: "mock",
+    };
+  }
+}
+
+/**
+ * Detect product creation intent from a natural-language message.
+ *
+ * Recognized patterns:
+ *   "Add new products: pen and pencil"
+ *   "Create a product called Notebook"
+ *   "I want to add a product: ballpoint pen"
+ *   "Add product: pen"
+ *
+ * Extracts product names, auto-generates SKUs if not provided,
+ * and creates each product via the create_product tool.
+ *
+ * @returns {Promise<object|null>} — mock LLM response, or null if not a product creation request
+ */
+async function detectProductCreation(lower, originalMessage, businessId, userId, toolCalls) {
+  // Detect product creation intent
+  const productPatterns = [
+    /(?:add|create|new|register)\s+(?:new\s+)?(?:a\s+|an\s+)?products?\s*:?\s*(.+)/i,
+    /(?:i\s+want\s+to|can\s+you|please|could\s+you)\s+.*(?:add|create|new)\s+(?:a\s+)?products?/i,
+  ];
+
+  const isProductIntent = productPatterns.some((p) => p.test(originalMessage));
+
+  // Exclude invoice-related messages (handled by detectInvoiceCreation)
+  if (lower.includes("invoice") || lower.includes("bill")) {
+    return null;
+  }
+
+  // Exclude instruction questions ("how do I add a product")
+  if (lower.includes("how do i") || lower.includes("how to") || lower.includes("how can i")) {
+    return null;
+  }
+
+  if (!isProductIntent) {
+    return null;
+  }
+
+  // Extract product names from the message
+  // Patterns: "products: pen and pencil", "product: pen", "product called Notebook"
+  let nameMatch = originalMessage.match(/products?\s*:?\s*(.+)/i);
+  if (nameMatch) {
+    // Strip leading "called"/"named" from the captured group
+    nameMatch[1] = nameMatch[1].replace(/^(?:called|named)\s+/i, "").trim();
+  }
+  if (!nameMatch || !nameMatch[1]) {
+    // "create a product called X" or "add a product named X"
+    nameMatch = originalMessage.match(/products?\s+(?:called|named)\s+(.+)/i);
+  }
+
+  if (!nameMatch) {
+    return {
+      reply: "[Mock LLM] I'd be happy to add a product. What's the product name? For example: \"Add product: Notebook\".",
+      tool_calls: [],
+      provider: "mock",
+    };
+  }
+
+  let namesStr = nameMatch[1].trim();
+
+  // Split by "and", commas, or semicolons
+  const productNames = namesStr
+    .split(/\s*(?:,|;|\band\b)\s*/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 1);
+
+  if (productNames.length === 0) {
+    return {
+      reply: "[Mock LLM] I'd be happy to add a product. What's the product name? For example: \"Add product: Notebook\".",
+      tool_calls: [],
+      provider: "mock",
+    };
+  }
+
+  // Create each product
+  const results = [];
+  for (const name of productNames) {
+    // Auto-generate SKU from name if not provided
+    const autoSku = name.toUpperCase().replace(/[^A-Z0-9]/g, "-").slice(0, 10) + "-" + Date.now().toString(36).slice(-4).toUpperCase();
+
+    const result = await executeTool("create_product", businessId, {
+      name: name,
+      sku: autoSku,
+      description: null,
+      unit_cost: null,
+    }, userId);
+
+    toolCalls.push({ tool: "create_product", args: { name, sku: autoSku } });
+
+    if (result.status === "success" && result.product) {
+      results.push(`  - "${result.product.name}" (SKU: ${result.product.sku}) — created successfully`);
+    } else if (result.status === "needs_clarification") {
+      results.push(`  - "${name}" — ${result.message}`);
+    } else {
+      results.push(`  - "${name}" — ${result.message || "Failed to create product"}`);
+    }
+  }
+
+  const successCount = results.filter((r) => r.includes("created successfully")).length;
+
+  return {
+    reply: `[Mock LLM] Product creation results:\n${results.join("\n")}\n\n${successCount} of ${productNames.length} product(s) created. You can view them in the Inventory page.`,
+    tool_calls: toolCalls,
+    provider: "mock",
+  };
+}
+
+/**
+ * Extract customer name from a natural-language message.
+ * Looks for patterns like "for [Name]", "to [Name]", "bill [Name]".
+ */
+function extractCustomerName(message) {
+  // Try various patterns to extract the customer name
+  const patterns = [
+    /(?:invoice\s+for|bill\s+|invoice\s+to)\s+(.+?)(?:\s+(?:for|amount|rm|ringgit|\$)|$)/i,
+    /(?:for|to)\s+(.+?)(?:\s+(?:for|amount|rm|ringgit|\$)|$)/i,
+    /(?:customer)\s+(.+?)(?:\s+(?:for|amount|rm|ringgit|\$)|$)/i,
+  ];
+
+  for (const p of patterns) {
+    const match = message.match(p);
+    if (match && match[1]) {
+      let name = match[1].trim();
+      // Remove trailing punctuation
+      name = name.replace(/[.,!?]+$/g, "").trim();
+      // Remove common filler words at the end
+      name = name.replace(/\s+(?:and\s+save.*|as\s+a\s+draft.*|but\s+don.*|for\s+rm.*|for\s+\$.*|amount.*)$/i, "").trim();
+      // Reject amount-like strings — these are not customer names
+      if (/^(?:rm|ringgit|\$)\s*\d/i.test(name) || /^\d+(?:\.\d{1,2})?$/.test(name)) {
+        continue; // Skip to next pattern
+      }
+      if (name.length >= 2 && name.length <= 200) {
+        return name;
+      }
+    }
+  }
+
+  // Fallback: try to extract words after "for"
+  const forMatch = message.match(/\bfor\s+([A-Z][\w\s&'-]{1,})/);
+  if (forMatch) {
+    let name = forMatch[1].trim().replace(/[.,!?]+$/g, "").trim();
+    name = name.replace(/\s+(?:for|amount|rm|ringgit|\$|and\s+save|as\s+a\s+draft|but\s+don).*$/i, "").trim();
+    // Reject amount-like strings
+    if (/^(?:rm|ringgit|\$)\s*\d/i.test(name) || /^\d+(?:\.\d{1,2})?$/.test(name)) {
+      return null;
+    }
+    if (name.length >= 2 && name.length <= 200) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extract monetary amount from a natural-language message.
+ * Recognizes: RM500, $500, 500.00, "500 ringgit", "five hundred"
+ */
+function extractAmount(message) {
+  // RM500, rm 500, ringgit 500
+  const rmMatch = message.match(/(?:rm|ringgit)\s*(\d+(?:\.\d{1,2})?)/i);
+  if (rmMatch) return parseFloat(rmMatch[1]);
+
+  // $500
+  const dollarMatch = message.match(/\$\s*(\d+(?:\.\d{1,2})?)/i);
+  if (dollarMatch) return parseFloat(dollarMatch[1]);
+
+  // "for 500", "amount 500", "total 500"
+  const forAmountMatch = message.match(/(?:for|amount|total(?:ing)?)\s*(?:of)?\s*(\d+(?:\.\d{1,2})?)/i);
+  if (forAmountMatch) return parseFloat(forAmountMatch[1]);
+
+  return null;
+}
+
+/**
+ * Extract description from a natural-language message.
+ */
+function extractDescription(message) {
+  // "description is X" or "for X" where X is not a number
+  const descMatch = message.match(/(?:description|details|note):\s*(.+?)(?:\s+(?:for|amount|rm)|$)/i);
+  if (descMatch) return descMatch[1].trim().slice(0, 500);
+  return null;
+}
+
+/**
+ * Format an invoice confirmation for display in the chatbox.
+ * Only shows verified fields from the actual database record.
+ */
+function formatInvoiceConfirmation(inv) {
+  // Format dates as YYYY-MM-DD (handle both Date objects and strings)
+  const formatDate = (d) => {
+    if (!d) return "N/A";
+    if (typeof d === "string") return d.slice(0, 10);
+    if (d instanceof Date) return d.toISOString().slice(0, 10);
+    return String(d);
+  };
+
+  let lines = [
+    "[Mock LLM] Invoice created successfully!",
+    "",
+    `Customer: ${inv.customer_name}`,
+    `Invoice number: ${inv.invoice_number}`,
+    `Issue date: ${formatDate(inv.issue_date)}`,
+    `Due date: ${formatDate(inv.due_date)}`,
+    `Subtotal: RM${parseFloat(inv.subtotal).toFixed(2)}`,
+    `Tax (6%): RM${parseFloat(inv.tax_amount).toFixed(2)}`,
+    `Total: RM${parseFloat(inv.total).toFixed(2)}`,
+    `Status: ${inv.status}`,
+  ];
+
+  if (inv.items && inv.items.length > 0) {
+    lines.push("");
+    lines.push("Line items:");
+    for (const item of inv.items) {
+      lines.push(`  - ${item.description} | Qty: ${item.quantity} | Unit: RM${parseFloat(item.unit_price).toFixed(2)} | Total: RM${parseFloat(item.line_total).toFixed(2)}`);
+    }
+  }
+
+  lines.push("");
+  lines.push(`Your invoice has been saved. You can open it in the Invoices page to review the details.`);
+
+  return lines.join("\n");
+}
+
+
 
 /**
  * Call a real LLM API (e.g., OpenAI Chat Completions).
@@ -559,20 +1318,28 @@ function formatToolResult(toolName, output) {
  * @param {object} params - { message, context, businessId }
  * @returns {Promise<{reply, tool_calls, provider}>}
  */
-export async function liveLLM({ message, context, businessId }) {
+export async function liveLLM({ message, context, businessId, userId }) {
   const apiKey = process.env.OPENAI_API_KEY || process.env.AI_API_KEY;
   const baseUrl = process.env.AI_API_BASE_URL || "https://api.openai.com/v1";
-  const model = process.env.AI_MODEL || "gpt-4o-mini";
+  const model = process.env.AI_MODEL || "gpt-4.1-mini";
 
   // Build the system prompt with tool descriptions
   const tools = getToolDefinitions();
   const systemPrompt =
-    "You are a helpful business assistant for the BUSYNESS platform. " +
+    "You are a helpful business assistant for the BUSYNESS platform (a Malaysian SME management system). " +
+    "You help with invoices, inventory, customers, tasks, marketing, and financial overview. " +
     "You have access to the following tools: " +
     tools.map((t) => `${t.name} (${t.description})`).join("; ") + ". " +
-    "When a user asks about business data, call the appropriate tool. " +
-    "When you don't understand the request, ask for clarification. " +
-    "Be concise and friendly. All financial figures should use $ formatting.";
+    "GUIDELINES:\n" +
+    "1. When a user asks about business data, call the appropriate tool. Use tool results to answer.\n" +
+    "2. When information is missing (e.g., customer name, amount, product name), ask a clarifying question. NEVER invent or guess values.\n" +
+    "3. For invoices, the amount is the total including 6% SST tax. Use RM (Ringgit Malaysia) for all monetary values.\n" +
+    "4. For product creation, if the user doesn't specify a SKU, ask them for one rather than making one up.\n" +
+    "5. For invoice creation, call create_invoice with the customer_name and amount. If the amount is missing, pass null — the tool will handle asking the user.\n" +
+    "6. When you don't understand the request, ask for clarification.\n" +
+    "7. Be concise, friendly, and helpful. Use natural conversational language.\n" +
+    "8. When listing data, format it clearly with bullet points or short tables.\n" +
+    "9. For follow-up questions, use the conversation context to understand references like 'that customer' or 'the same amount'.";
 
   // Build messages array
   const messages = [
@@ -590,6 +1357,7 @@ export async function liveLLM({ message, context, businessId }) {
     function: {
       name: t.name,
       description: t.description,
+      parameters: t.params || { type: "object", properties: {} },
     },
   }));
 
@@ -613,7 +1381,7 @@ export async function liveLLM({ message, context, businessId }) {
         body: JSON.stringify({
           model,
           messages,
-          max_tokens: 500,
+          max_tokens: 1000,
           temperature: 0.7,
           ...(openaiTools.length > 0 ? { tools: openaiTools } : {}),
         }),
@@ -663,7 +1431,7 @@ export async function liveLLM({ message, context, businessId }) {
         }
 
         try {
-          const result = await executeTool(toolName, businessId, parsedArgs);
+          const result = await executeTool(toolName, businessId, parsedArgs, userId);
           toolCallsLog.push({ tool: toolName, args: parsedArgs });
 
           // Add tool result to conversation for the next round
@@ -718,19 +1486,20 @@ export async function liveLLM({ message, context, businessId }) {
  * @param {string} params.message — user's message
  * @param {Array<{role: string, content: string}>} params.context — prior messages (max 20)
  * @param {string} params.businessId — verified business UUID from auth context
+ * @param {string} [params.userId] — verified user UUID from JWT (for write tools)
  * @returns {Promise<{reply: string, tool_calls: Array, provider: string, isLive: boolean}>}
  */
-export async function generateResponse({ message, context, businessId }) {
+export async function generateResponse({ message, context, businessId, userId }) {
   const info = getProviderInfo();
 
   if (info.isLive) {
     try {
-      const result = await liveLLM({ message, context, businessId });
+      const result = await liveLLM({ message, context, businessId, userId });
       return { ...result, isLive: true };
     } catch (err) {
       // If the live LLM fails, fall back to mock with a warning
       console.error("[LLM] Live provider failed, falling back to mock:", err.message);
-      const mockResult = await mockLLM({ message, context, businessId });
+      const mockResult = await mockLLM({ message, context, businessId, userId });
       return {
         ...mockResult,
         reply: `[LLM fallback] ${mockResult.reply}`,
@@ -740,6 +1509,6 @@ export async function generateResponse({ message, context, businessId }) {
     }
   }
 
-  const result = await mockLLM({ message, context, businessId });
+  const result = await mockLLM({ message, context, businessId, userId });
   return { ...result, isLive: false };
 }

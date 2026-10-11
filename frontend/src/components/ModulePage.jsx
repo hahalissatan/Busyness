@@ -24,6 +24,7 @@
  */
 
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { ChatInput } from "./ChatInput.jsx";
 import { FeatureCard } from "./FeatureCard.jsx";
 import { api } from "../api/client.js";
@@ -39,6 +40,7 @@ export function ModulePage({
   children,
 }) {
   const { business } = useAuth();
+  const navigate = useNavigate();
   const [thread, setThread] = useState([]);
   const [thinking, setThinking] = useState(false);
   const [providerInfo, setProviderInfo] = useState(null);
@@ -81,7 +83,19 @@ export function ModulePage({
       setThread((t) => [
         ...t,
         { role: "user", text: question },
-        { role: "assistant", text: reply },
+        {
+          role: "assistant",
+          text: reply,
+          // Store tool calls and invoice data for rich rendering
+          tool_calls: res?.tool_calls || [],
+          // Check if this is an invoice creation success
+          invoice_created: reply.includes("Invoice created successfully!"),
+          // Extract invoice number for linking
+          invoice_number: (() => {
+            const m = reply.match(/Invoice number:\s*(\S+)/);
+            return m ? m[1] : null;
+          })(),
+        },
       ]);
     } catch (err) {
       setThread((t) => [
@@ -112,7 +126,9 @@ export function ModulePage({
       {/* Chat thread (if any) */}
       {thread.length > 0 && (
         <div className="space-y-3 max-w-2xl mx-auto w-full">
-          {thread.map((m, i) => (
+          {thread.map((m, i) => {
+            const isInvoiceCreated = m.invoice_created;
+            return (
             <div
               key={i}
               className={`glass-card px-4 py-3 text-sm ${
@@ -127,8 +143,20 @@ export function ModulePage({
               <div className="text-gray-900 dark:text-white whitespace-pre-wrap">
                 {m.text}
               </div>
+              {/* Invoice action button */}
+              {isInvoiceCreated && m.invoice_number && (
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={() => navigate("/financial/invoices")}
+                    className="px-3 py-1.5 rounded-lg bg-brand-600 text-white text-xs font-medium hover:bg-brand-700 transition"
+                  >
+                    Open Invoices
+                  </button>
+                </div>
+              )}
             </div>
-          ))}
+            );
+          })}
           {/* Thinking indicator */}
           {thinking && (
             <div className="glass-card mr-12 px-4 py-3 text-sm">

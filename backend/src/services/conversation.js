@@ -13,7 +13,9 @@
  *     tool results as facts.
  *   - Tools are executed server-side only, using businessId from the
  *     authenticated request context.
- *   - All operations are READ-ONLY — no write or destructive actions.
+ *   - Read-only tools perform queries. Write tools (create_invoice)
+ *     perform inserts through the existing validated backend services
+ *     with transactional integrity and duplicate prevention.
  *   - Tool calls and result sizes are limited.
  *
  * Lifecycle:
@@ -147,6 +149,7 @@ export async function handleConversation({ businessId, userId, message, context 
     message: msgValidation.value,
     context: sanitizedContext,
     businessId,
+    userId,
   });
 
   // 4. Write audit log

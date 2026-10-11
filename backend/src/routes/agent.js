@@ -21,7 +21,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { BadRequestError, NotFoundError } from "../utils/errors.js";
 import { runCoordinator, listAgentRuns, getAgentRun } from "../services/coordinator.js";
 import { handleConversation } from "../services/conversation.js";
-import { getToolDefinitions, executeTool } from "../services/llmProvider.js";
+import { getToolDefinitions, executeTool, getProviderInfo } from "../services/llmProvider.js";
 
 const router = Router({ mergeParams: true });
 
@@ -95,7 +95,12 @@ router.get("/runs/:runId", asyncHandler(async (req, res) => {
 //
 // The businessId is derived from the authenticated request context (URL param
 // verified by requireBusinessAccess middleware) — never from the request body.
+// userId is derived from the authenticated JWT — never from the request body.
 // Context is validated, sanitized, and never trusted as facts.
+//
+// The AI can call both read-only tools (get_inventory_summary, etc.) and
+// write tools (create_invoice). Write tools are validated server-side
+// and executed through the existing transactional backend services.
 
 router.post("/chat", asyncHandler(async (req, res) => {
   const { businessId, user } = req;
@@ -132,6 +137,22 @@ router.post("/chat", asyncHandler(async (req, res) => {
 router.get("/tools", asyncHandler(async (req, res) => {
   const tools = getToolDefinitions();
   res.json({ tools });
+}));
+
+// --- GET /agent/provider — Show LLM provider status -----------------------
+//
+// Returns whether the agent is using a real LLM or the mock fallback.
+// Does NOT expose API keys or secrets — only the provider name and status.
+
+router.get("/provider", asyncHandler(async (req, res) => {
+  const info = getProviderInfo();
+  res.json({
+    provider: info.provider,
+    isLive: info.isLive,
+    note: info.note,
+    model: process.env.AI_MODEL || (info.isLive ? "gpt-4.1-mini" : null),
+    baseUrl: process.env.AI_API_BASE_URL || (info.isLive ? "https://api.openai.com/v1" : null),
+  });
 }));
 
 // --- POST /agent/tools/:toolName — Execute a read-only tool ---------------
