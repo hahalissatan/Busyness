@@ -40,6 +40,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
+import { getTaskOverview as memTaskOverview, getTeamWorkload as memTeamWorkload } from "../services/inMemoryStore.js";
 import { withTransaction } from "../utils/transaction.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { authenticateToken } from "../middleware/auth.js";
@@ -983,28 +984,47 @@ router.get(
   asyncHandler(async (req, res) => {
     const businessId = req.businessId;
 
-    const summary = await query(
-      `SELECT
-         COUNT(*)::int AS total_tasks,
-         COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_tasks,
-         COUNT(*) FILTER (WHERE status = 'in_progress')::int AS in_progress_tasks,
-         COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_tasks,
-         COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_tasks,
-         COUNT(*) FILTER (WHERE priority = 'low')::int AS low_priority,
-         COUNT(*) FILTER (WHERE priority = 'medium')::int AS medium_priority,
-         COUNT(*) FILTER (WHERE priority = 'high')::int AS high_priority,
-         COUNT(*) FILTER (WHERE priority = 'urgent')::int AS urgent_priority,
-         COUNT(*) FILTER (WHERE deadline IS NOT NULL AND deadline < now()
-           AND status NOT IN ('completed', 'cancelled'))::int AS overdue_tasks,
-         (SELECT COUNT(*)::int FROM task_assignments ta
-          JOIN tasks t ON t.id = ta.task_id
-          WHERE t.business_id = $1 AND ta.status = 'active')::int AS total_active_assignments
-       FROM tasks
-       WHERE business_id = $1`,
-      [businessId]
-    );
+    try {
+      const summary = await query(
+        `SELECT
+           COUNT(*)::int AS total_tasks,
+           COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_tasks,
+           COUNT(*) FILTER (WHERE status = 'in_progress')::int AS in_progress_tasks,
+           COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_tasks,
+           COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_tasks,
+           COUNT(*) FILTER (WHERE priority = 'low')::int AS low_priority,
+           COUNT(*) FILTER (WHERE priority = 'medium')::int AS medium_priority,
+           COUNT(*) FILTER (WHERE priority = 'high')::int AS high_priority,
+           COUNT(*) FILTER (WHERE priority = 'urgent')::int AS urgent_priority,
+           COUNT(*) FILTER (WHERE deadline IS NOT NULL AND deadline < now()
+             AND status NOT IN ('completed', 'cancelled'))::int AS overdue_tasks,
+           (SELECT COUNT(*)::int FROM task_assignments ta
+            JOIN tasks t ON t.id = ta.task_id
+            WHERE t.business_id = $1 AND ta.status = 'active')::int AS total_active_assignments
+         FROM tasks
+         WHERE business_id = $1`,
+        [businessId]
+      );
 
-    res.json(summary.rows[0]);
+      res.json(summary.rows[0]);
+    } catch {
+      // DB unavailable — fall back to in-memory data
+      const mem = memTaskOverview();
+      const team = memTeamWorkload();
+      res.json({
+        total_tasks: mem.total_tasks,
+        pending_tasks: mem.pending,
+        in_progress_tasks: mem.in_progress,
+        completed_tasks: mem.completed,
+        cancelled_tasks: 0,
+        low_priority: 0,
+        medium_priority: mem.total_tasks - mem.completed,
+        high_priority: mem.overdue,
+        urgent_priority: mem.overdue,
+        overdue_tasks: mem.overdue,
+        total_active_assignments: team.team.reduce((s, m) => s + m.active, 0),
+      });
+    }
   })
 );
 

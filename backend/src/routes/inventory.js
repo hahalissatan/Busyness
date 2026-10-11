@@ -47,6 +47,11 @@
 import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
+import {
+  getInventorySummary as memInventorySummary,
+  getLowStock as memLowStock,
+  products as memProducts,
+} from "../services/inMemoryStore.js";
 import { withTransaction } from "../utils/transaction.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { authenticateToken } from "../middleware/auth.js";
@@ -776,21 +781,35 @@ router.get(
   asyncHandler(async (req, res) => {
     const businessId = req.businessId;
 
-    const summary = await query(
-      `SELECT
-         COUNT(*)::int AS total_products,
-         COUNT(*) FILTER (WHERE is_active = true)::int AS active_products,
-         COUNT(*) FILTER (WHERE is_active = false)::int AS inactive_products,
-         COUNT(*) FILTER (WHERE stock_quantity <= min_stock_threshold AND is_active = true)::int AS low_stock_count,
-         COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' AND is_active = true)::int AS near_expiry_count,
-         COALESCE(SUM(stock_quantity * unit_cost), 0)::numeric(14,2) AS total_stock_value,
-         COALESCE(SUM(stock_quantity), 0)::numeric(12,2) AS total_stock_units
-       FROM products
-       WHERE business_id = $1`,
-      [businessId]
-    );
+    try {
+      const summary = await query(
+        `SELECT
+           COUNT(*)::int AS total_products,
+           COUNT(*) FILTER (WHERE is_active = true)::int AS active_products,
+           COUNT(*) FILTER (WHERE is_active = false)::int AS inactive_products,
+           COUNT(*) FILTER (WHERE stock_quantity <= min_stock_threshold AND is_active = true)::int AS low_stock_count,
+           COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' AND is_active = true)::int AS near_expiry_count,
+           COALESCE(SUM(stock_quantity * unit_cost), 0)::numeric(14,2) AS total_stock_value,
+           COALESCE(SUM(stock_quantity), 0)::numeric(12,2) AS total_stock_units
+         FROM products
+         WHERE business_id = $1`,
+        [businessId]
+      );
 
-    res.json(summary.rows[0]);
+      res.json(summary.rows[0]);
+    } catch {
+      // DB unavailable — fall back to in-memory data
+      const mem = memInventorySummary();
+      res.json({
+        total_products: mem.total_products,
+        active_products: mem.total_products,
+        inactive_products: 0,
+        low_stock_count: mem.low_stock_count,
+        near_expiry_count: 0,
+        total_stock_value: parseFloat(mem.total_value).toFixed(2),
+        total_stock_units: memProducts.reduce((s, p) => s + p.stock_quantity, 0).toFixed(2),
+      });
+    }
   })
 );
 
@@ -801,27 +820,46 @@ router.get(
   asyncHandler(async (req, res) => {
     const businessId = req.businessId;
 
-    const result = await query(
-      `SELECT p.id, p.business_id, p.name, p.sku, p.description, p.stock_quantity,
-          p.min_stock_threshold, p.unit_cost, p.expiry_date, p.supplier_id,
-          p.is_active, p.created_at, p.updated_at,
-          s.name AS supplier_name,
-          (p.stock_quantity * p.unit_cost)::numeric(12,2) AS stock_value,
-          (p.min_stock_threshold - p.stock_quantity)::numeric(10,2) AS shortfall
-       FROM products p
-       LEFT JOIN suppliers s ON p.supplier_id = s.id
-       WHERE p.business_id = $1
-         AND p.is_active = true
-         AND p.stock_quantity <= p.min_stock_threshold
-       ORDER BY (p.min_stock_threshold - p.stock_quantity) DESC,
-                p.expiry_date ASC NULLS LAST`,
-      [businessId]
-    );
+    try {
+      const result = await query(
+        `SELECT p.id, p.business_id, p.name, p.sku, p.description, p.stock_quantity,
+            p.min_stock_threshold, p.unit_cost, p.expiry_date, p.supplier_id,
+            p.is_active, p.created_at, p.updated_at,
+            s.name AS supplier_name,
+            (p.stock_quantity * p.unit_cost)::numeric(12,2) AS stock_value,
+            (p.min_stock_threshold - p.stock_quantity)::numeric(10,2) AS shortfall
+         FROM products p
+         LEFT JOIN suppliers s ON p.supplier_id = s.id
+         WHERE p.business_id = $1
+           AND p.is_active = true
+           AND p.stock_quantity <= p.min_stock_threshold
+         ORDER BY (p.min_stock_threshold - p.stock_quantity) DESC,
+                  p.expiry_date ASC NULLS LAST`,
+        [businessId]
+      );
 
-    res.json({
-      data: result.rows,
-      count: result.rows.length,
-    });
+      res.json({
+        data: result.rows,
+        count: result.rows.length,
+      });
+    } catch {
+      // DB unavailable — fall back to in-memory data
+      const mem = memLowStock();
+      res.json({
+        data: mem.items.map((p) => ({
+          id: p.id,
+          name: p.name,
+          sku: p.sku,
+          stock_quantity: p.stock_quantity,
+          min_stock_threshold: p.min_stock_threshold,
+          unit_cost: p.unit_cost,
+          shortfall: (p.min_stock_threshold - p.stock_quantity).toFixed(2),
+          stock_value: (p.stock_quantity * p.unit_cost).toFixed(2),
+          supplier_name: null,
+        })),
+        count: mem.count,
+      });
+    }
   })
 );
 

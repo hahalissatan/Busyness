@@ -56,6 +56,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
+import { getMarketingOverview as memMarketingOverview } from "../services/inMemoryStore.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { authenticateToken } from "../middleware/auth.js";
 import { requireBusinessAccess } from "../middleware/businessAuth.js";
@@ -1474,26 +1475,47 @@ router.get(
   asyncHandler(async (req, res) => {
     const businessId = req.businessId;
 
-    const summary = await query(
-      `SELECT
-         (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1) AS total_projects,
-         (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1 AND status = 'draft') AS draft_projects,
-         (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1 AND status = 'active') AS active_projects,
-         (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1 AND status = 'completed') AS completed_projects,
-         (SELECT COUNT(*)::int FROM customer_personas WHERE business_id = $1) AS total_personas,
-         (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1) AS total_drafts,
-         (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'draft') AS draft_drafts,
-         (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'reviewed') AS reviewed_drafts,
-         (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'approved') AS approved_drafts,
-         (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'published') AS published_drafts,
-         (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1) AS total_pitch_decks,
-         (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1 AND status = 'draft') AS draft_pitch_decks,
-         (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1 AND status = 'reviewed') AS reviewed_pitch_decks,
-         (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1 AND status = 'finalized') AS finalized_pitch_decks`,
-      [businessId]
-    );
+    try {
+      const summary = await query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1) AS total_projects,
+           (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1 AND status = 'draft') AS draft_projects,
+           (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1 AND status = 'active') AS active_projects,
+           (SELECT COUNT(*)::int FROM marketing_projects WHERE business_id = $1 AND status = 'completed') AS completed_projects,
+           (SELECT COUNT(*)::int FROM customer_personas WHERE business_id = $1) AS total_personas,
+           (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1) AS total_drafts,
+           (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'draft') AS draft_drafts,
+           (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'reviewed') AS reviewed_drafts,
+           (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'approved') AS approved_drafts,
+           (SELECT COUNT(*)::int FROM marketing_drafts WHERE business_id = $1 AND status = 'published') AS published_drafts,
+           (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1) AS total_pitch_decks,
+           (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1 AND status = 'draft') AS draft_pitch_decks,
+           (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1 AND status = 'reviewed') AS reviewed_pitch_decks,
+           (SELECT COUNT(*)::int FROM pitch_decks WHERE business_id = $1 AND status = 'finalized') AS finalized_pitch_decks`,
+        [businessId]
+      );
 
-    res.json(summary.rows[0]);
+      res.json(summary.rows[0]);
+    } catch {
+      // DB unavailable — fall back to in-memory data
+      const mem = memMarketingOverview();
+      res.json({
+        total_projects: mem.total_projects,
+        draft_projects: mem.draft,
+        active_projects: mem.active,
+        completed_projects: mem.completed,
+        total_personas: 3,
+        total_drafts: mem.total_drafts,
+        draft_drafts: mem.total_drafts,
+        reviewed_drafts: 0,
+        approved_drafts: 0,
+        published_drafts: 0,
+        total_pitch_decks: mem.total_pitch_decks,
+        draft_pitch_decks: mem.total_pitch_decks,
+        reviewed_pitch_decks: 0,
+        finalized_pitch_decks: 0,
+      });
+    }
   })
 );
 
