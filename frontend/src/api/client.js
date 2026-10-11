@@ -14,12 +14,14 @@ const TOKEN_KEY = "busyness_token";
 
 /**
  * Get the API base URL.
- * In development, the Vite proxy handles /api → localhost:3001, so we use
- * relative paths (just "/api/...").
- * In production, VITE_API_BASE_URL must be set to the backend URL (e.g.
- * "https://busyness-api.onrender.com"). All API calls are sent there directly.
+ * Priority: VITE_API_BASE_URL env var → hardcoded production default → "" (dev proxy)
+ * In dev (localhost), returns "" so the Vite proxy handles /api → localhost:3001.
+ * In production (Vercel), points to the Render backend.
  */
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+  || (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1"
+    ? "https://busyness-backend.onrender.com"
+    : "");
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY);
