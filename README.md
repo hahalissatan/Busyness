@@ -1,5 +1,5 @@
 # Busyness
-Turn Busyness into Business — a smarter way to manage business operations.
+Turn Busyness into Business — a smarter way to manage small business operations.
 
 ## Prerequisites
 
